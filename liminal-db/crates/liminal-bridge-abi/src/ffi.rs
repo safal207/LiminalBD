@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
+use liminal_store::{decode_delta, DiskJournal, Offset};
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 
@@ -17,6 +18,8 @@ struct BridgeState {
     runtime: tokio::runtime::Runtime,
     field: Arc<Mutex<ClusterField>>,
     outbox: Arc<StdMutex<Outbox>>,
+    #[allow(dead_code)]
+    journal: Option<Arc<DiskJournal>>,
 }
 
 static STATE: OnceLock<BridgeState> = OnceLock::new();
@@ -30,9 +33,33 @@ impl BridgeState {
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;
-
-        let mut field = ClusterField::new();
-        field.add_root("liminal/root");
+        let (field, journal) = if let Some(path) = config.store_path {
+            let journal = Arc::new(DiskJournal::open(path).map_err(|e| e.to_string())?);
+            let (mut field, replay_offset) = if let Some((seed, offset)) =
+                journal.load_latest_snapshot().map_err(|e| e.to_string())?
+            {
+                (seed.into_field(), offset)
+            } else {
+                (ClusterField::new(), Offset::start())
+            };
+            let mut stream = journal
+                .stream_from(replay_offset)
+                .map_err(|e| e.to_string())?;
+            while let Some(record) = stream.next() {
+                let bytes = record.map_err(|e| e.to_string())?;
+                let delta = decode_delta(&bytes).map_err(|e| e.to_string())?;
+                field.apply_delta(&delta);
+            }
+            if field.cells.is_empty() {
+                field.add_root("liminal/root");
+            }
+            field.set_journal(journal.clone());
+            (field, Some(journal))
+        } else {
+            let mut field = ClusterField::new();
+            field.add_root("liminal/root");
+            (field, None)
+        };
         let field = Arc::new(Mutex::new(field));
         let outbox = Arc::new(StdMutex::new(Outbox::default()));
         let tick_ms = Arc::new(AtomicU32::new(config.tick_ms));
@@ -41,6 +68,7 @@ impl BridgeState {
             runtime,
             field: field.clone(),
             outbox: outbox.clone(),
+            journal,
         };
 
         state.start_life_loop(config.tick_ms, outbox, tick_ms);
@@ -186,7 +214,10 @@ mod tests {
 
     #[test]
     fn ffi_flow() {
-        let cfg = BridgeConfig { tick_ms: 200 };
+        let cfg = BridgeConfig {
+            tick_ms: 200,
+            store_path: None,
+        };
         let cfg_bytes = serde_cbor::to_vec(&cfg).unwrap();
         assert!(liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()));
 

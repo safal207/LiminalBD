@@ -9,6 +9,8 @@ use serde_cbor::Value;
 pub struct BridgeConfig {
     #[serde(rename = "tick_ms")]
     pub tick_ms: u32,
+    #[serde(rename = "store", skip_serializing_if = "Option::is_none")]
+    pub store_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
