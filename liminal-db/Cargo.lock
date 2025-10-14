@@ -232,6 +232,7 @@ dependencies = [
  "liminal-core",
  "liminal-sensor",
  "liminal-store",
+ "serde",
  "serde_cbor",
  "serde_json",
  "tokio",

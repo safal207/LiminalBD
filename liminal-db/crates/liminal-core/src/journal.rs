@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::reflex::{ReflexFire, ReflexId, ReflexRule};
 use crate::types::{NodeId, NodeState};
 
 pub trait Journal: Send + Sync {
@@ -29,6 +30,12 @@ pub enum EventDelta {
     Affinity(AffinityDelta),
     #[serde(rename = "energy")]
     Energy(EnergyDelta),
+    #[serde(rename = "reflex_add")]
+    ReflexAdd(ReflexRule),
+    #[serde(rename = "reflex_remove")]
+    ReflexRemove { id: ReflexId },
+    #[serde(rename = "reflex_fire")]
+    ReflexFire(ReflexFire),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

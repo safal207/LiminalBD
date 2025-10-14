@@ -10,9 +10,10 @@ use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
 use liminal_bridge_abi::protocol::BridgeConfig;
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
-use liminal_core::ClusterField;
+use liminal_core::{ClusterField, ReflexAction, ReflexRule, ReflexWhen};
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
@@ -235,6 +236,13 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                             }
                         }
                     }
+                    command if command.starts_with("reflex") => {
+                        handle_reflex_command(
+                            command.trim_start_matches("reflex").trim(),
+                            &field_for_cli,
+                        )
+                        .await;
+                    }
                     other => {
                         eprintln!("Unknown command: :{}", other);
                     }
@@ -385,6 +393,103 @@ async fn export_snapshot(field: &StdArc<Mutex<ClusterField>>, path: &Path) -> Re
     let pretty = serde_json::to_string_pretty(&snapshot_json)?;
     fs::write(path, pretty)?;
     Ok(path.to_path_buf())
+}
+
+async fn handle_reflex_command(command: &str, field: &StdArc<Mutex<ClusterField>>) {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            eprintln!("usage: :reflex <add|list|rm> ...");
+        }
+        "add" => {
+            if rest.is_empty() {
+                eprintln!("usage: :reflex add <json>");
+                return;
+            }
+            match serde_json::from_str::<ReflexAddRequest>(rest) {
+                Ok(spec) => {
+                    let ReflexAddRequest {
+                        token,
+                        kind,
+                        min_strength,
+                        window_ms,
+                        min_count,
+                        then,
+                        enabled,
+                    } = spec;
+                    let rule = ReflexRule {
+                        id: 0,
+                        when: ReflexWhen {
+                            token,
+                            kind,
+                            min_strength,
+                            window_ms,
+                            min_count,
+                        },
+                        then,
+                        enabled,
+                    };
+                    let id = {
+                        let mut guard = field.lock().await;
+                        guard.add_reflex(rule)
+                    };
+                    println!("REFLEX_ADDED id={}", id);
+                }
+                Err(err) => eprintln!("invalid reflex spec: {err}"),
+            }
+        }
+        "list" => {
+            let rules = {
+                let guard = field.lock().await;
+                guard.list_reflex()
+            };
+            match serde_json::to_string_pretty(&rules) {
+                Ok(json) => println!("{}", json),
+                Err(err) => eprintln!("failed to render rules: {err}"),
+            }
+        }
+        "rm" => {
+            if rest.is_empty() {
+                eprintln!("usage: :reflex rm <id>");
+                return;
+            }
+            match rest.parse::<u64>() {
+                Ok(id) => {
+                    let removed = {
+                        let mut guard = field.lock().await;
+                        guard.remove_reflex(id)
+                    };
+                    if removed {
+                        println!("REFLEX_REMOVED id={}", id);
+                    } else {
+                        eprintln!("no reflex with id={} found", id);
+                    }
+                }
+                Err(err) => eprintln!("invalid reflex id: {err}"),
+            }
+        }
+        other => {
+            eprintln!("Unknown reflex command: {}", other);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReflexAddRequest {
+    token: String,
+    kind: ImpulseKind,
+    min_strength: f32,
+    window_ms: u32,
+    min_count: u16,
+    then: ReflexAction,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn parse_command(line: &str) -> Option<Impulse> {
