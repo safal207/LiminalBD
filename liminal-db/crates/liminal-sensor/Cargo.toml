@@ -1,0 +1,14 @@
+[package]
+name = "liminal-sensor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+liminal-core = { path = "../liminal-core" }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+sysinfo = "0.30"
+rand = "0.8"
+rand_chacha = "0.3"

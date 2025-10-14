@@ -1,0 +1,10 @@
+[package]
+name = "liminal-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+liminal-core = { path = "../liminal-core" }
+liminal-sensor = { path = "../liminal-sensor" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
