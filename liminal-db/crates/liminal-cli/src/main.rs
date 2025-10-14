@@ -10,7 +10,7 @@ use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
 use liminal_bridge_abi::protocol::BridgeConfig;
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
-use liminal_core::{ClusterField, ReflexAction, ReflexRule, ReflexWhen};
+use liminal_core::{ClusterField, ReflexAction, ReflexRule, ReflexWhen, TrsConfig};
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
 use serde::Deserialize;
@@ -166,11 +166,13 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                     snapshot
                 };
                 println!(
-                    "METRICS cells={} sleeping={:.2} avgMet={:.2} avgLat={:.1} | HINTS: {:?}",
+                    "METRICS cells={} sleeping={:.2} active={:.2} avgMet={:.2} avgLat={:.1} live={:.2} | HINTS: {:?}",
                     metrics.cells,
                     metrics.sleeping_pct,
+                    metrics.active_pct,
                     metrics.avg_metabolism,
                     metrics.avg_latency_ms,
+                    metrics.live_load,
                     hints
                 );
             },
@@ -242,6 +244,16 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                             &field_for_cli,
                         )
                         .await;
+                    }
+                    command if command.starts_with("trs") => {
+                        if let Err(err) = handle_trs_command(
+                            command.trim_start_matches("trs").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("TRS command failed: {err}");
+                        }
                     }
                     other => {
                         eprintln!("Unknown command: :{}", other);
@@ -473,6 +485,81 @@ async fn handle_reflex_command(command: &str, field: &StdArc<Mutex<ClusterField>
         other => {
             eprintln!("Unknown reflex command: {}", other);
         }
+    }
+}
+
+async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "show" => {
+            let (config, err_i, last_err, last_ts, harmony) = {
+                let guard = field.lock().await;
+                let state = guard.trs.clone();
+                (
+                    state.to_config(),
+                    state.err_i,
+                    state.last_err,
+                    state.last_ts,
+                    guard.harmony_state(),
+                )
+            };
+            let payload = json!({
+                "config": {
+                    "alpha": config.alpha,
+                    "beta": config.beta,
+                    "k_p": config.k_p,
+                    "k_i": config.k_i,
+                    "k_d": config.k_d,
+                    "target": config.target_load,
+                },
+                "err_i": err_i,
+                "last_err": last_err,
+                "last_ts": last_ts,
+                "harmony": {
+                    "alpha": harmony.alpha,
+                    "affinity_scale": harmony.affinity_scale,
+                    "metabolism_scale": harmony.metabolism_scale,
+                    "sleep_delta": harmony.sleep_delta,
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            Ok(())
+        }
+        "set" => {
+            let raw = parts.next().unwrap_or("").trim();
+            if raw.is_empty() {
+                return Err(anyhow!(
+                    "usage: :trs set {{\"alpha\":...,\"beta\":...,\"k_p\":...,\"k_i\":...,\"k_d\":...,\"target_load\":...}}"
+                ));
+            }
+            let cfg: TrsConfig = serde_json::from_str(raw)?;
+            let event = {
+                let mut guard = field.lock().await;
+                guard.set_trs_config(cfg)
+            };
+            println!("{}", event);
+            Ok(())
+        }
+        "target" => {
+            let value_raw = parts.next().unwrap_or("").trim();
+            if value_raw.is_empty() {
+                return Err(anyhow!("usage: :trs target <0.3..0.8>"));
+            }
+            let value: f32 = value_raw
+                .parse()
+                .map_err(|_| anyhow!("invalid target value: {}", value_raw))?;
+            if !(0.3..=0.8).contains(&value) {
+                return Err(anyhow!("target must be within 0.3..0.8"));
+            }
+            let event = {
+                let mut guard = field.lock().await;
+                guard.set_trs_target(value)
+            };
+            println!("{}", event);
+            Ok(())
+        }
+        other => Err(anyhow!("unknown trs subcommand: {}", other)),
     }
 }
 

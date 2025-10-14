@@ -34,6 +34,17 @@ pub async fn run_loop<F, G, H>(
         elapsed_since_metrics += tick_ms;
         if elapsed_since_metrics >= 1000 {
             let metrics = analyze(&guard);
+            let observed = metrics.observed_load();
+            let target = metrics.suggest_target();
+            let now_ms = guard.now_ms;
+            guard.trs.set_target(target);
+            let trs_output = guard.trs.step(now_ms, observed);
+            let new_tick = (tick_ms as i64 + trs_output.tick_adjust_ms as i64).clamp(80, 450);
+            tick_ms = new_tick as u64;
+            let trs_events = guard.apply_trs_output(now_ms, observed, &trs_output);
+            for event in trs_events {
+                on_event(&event);
+            }
             let advice = gather_hints(&metrics);
             for hint in &advice {
                 on_hint(hint);

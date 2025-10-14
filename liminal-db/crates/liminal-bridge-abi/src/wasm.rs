@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::protocol::{
     adjust_tick, event_from_field_log, event_from_hint, event_from_impulse_log, event_from_metrics,
-    BridgeConfig, Outbox, ProtocolImpulse, ProtocolMetrics, ProtocolPackage,
+    BridgeConfig, Outbox, ProtocolCommand, ProtocolMetrics, ProtocolPackage, ProtocolPush,
 };
 
 thread_local! {
@@ -39,11 +39,24 @@ impl WasmState {
         })
     }
 
-    fn route_impulse(&mut self, impulse: ProtocolImpulse) {
-        let logs = self.field.route_impulse(impulse.to_core());
-        for log in logs {
-            if let Some(event) = event_from_impulse_log(&log) {
-                self.outbox.push_event(event);
+    fn handle_push(&mut self, message: ProtocolPush) {
+        match message {
+            ProtocolPush::Impulse(impulse) => {
+                let logs = self.field.route_impulse(impulse.to_core());
+                for log in logs {
+                    if let Some(event) = event_from_impulse_log(&log) {
+                        self.outbox.push_event(event);
+                    }
+                }
+            }
+            ProtocolPush::Command(command) => {
+                let event_string = match command {
+                    ProtocolCommand::TrsSet { cfg } => self.field.set_trs_config(cfg),
+                    ProtocolCommand::TrsTarget { value } => self.field.set_trs_target(value),
+                };
+                if let Some(event) = event_from_field_log(&event_string, self.tick_ms) {
+                    self.outbox.push_event(event);
+                }
             }
         }
     }
@@ -139,11 +152,11 @@ pub fn push(msg_cbor: Uint8Array) -> u32 {
             return 0;
         };
         let data = msg_cbor.to_vec();
-        let impulse: ProtocolImpulse = match serde_cbor::from_slice(&data) {
-            Ok(imp) => imp,
+        let message: ProtocolPush = match serde_cbor::from_slice(&data) {
+            Ok(msg) => msg,
             Err(_) => return 0,
         };
-        instance.route_impulse(impulse);
+        instance.handle_push(message);
         instance.maybe_tick();
         data.len() as u32
     })

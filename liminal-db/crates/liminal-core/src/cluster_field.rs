@@ -3,14 +3,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::Rng;
+use serde_json::json;
 
 use crate::journal::{
     AffinityDelta, CellSnapshot, DivideDelta, EnergyDelta, EventDelta, Journal, LinkDelta,
-    StateDelta, TickDelta,
+    StateDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule};
 use crate::seed::{create_seed, SeedParams};
+use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
 
 pub type FieldEvents = Vec<String>;
@@ -31,6 +33,27 @@ pub struct ClusterField {
     recent_routes: HashMap<String, VecDeque<NodeId>>,
     sleeping_accum_ms: u64,
     last_dream_ms: u64,
+    pub trs: TrsState,
+    harmony: HarmonyTuning,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HarmonyTuning {
+    pub alpha: f32,
+    pub affinity_scale: f32,
+    pub metabolism_scale: f32,
+    pub sleep_delta: f32,
+}
+
+impl Default for HarmonyTuning {
+    fn default() -> Self {
+        HarmonyTuning {
+            alpha: 0.2,
+            affinity_scale: 1.0,
+            metabolism_scale: 1.0,
+            sleep_delta: 0.0,
+        }
+    }
 }
 
 impl ClusterField {
@@ -51,6 +74,8 @@ impl ClusterField {
             last_dream_ms: 0,
             route_bias: HashMap::new(),
             recent_routes: HashMap::new(),
+            trs: TrsState::default(),
+            harmony: HarmonyTuning::default(),
         }
     }
 
@@ -69,6 +94,94 @@ impl ClusterField {
 
     pub fn rebuild_caches(&mut self) {
         self.rebuild_index();
+    }
+
+    pub fn harmony_state(&self) -> HarmonyTuning {
+        self.harmony
+    }
+
+    pub fn trs_config(&self) -> TrsConfig {
+        self.trs.to_config()
+    }
+
+    pub fn set_trs_config(&mut self, cfg: TrsConfig) -> String {
+        self.trs.apply_config(&cfg);
+        self.harmony.alpha = self.trs.alpha;
+        self.emit(EventDelta::TrsSet(cfg.clone()));
+        json!({
+            "ev": "trs_config",
+            "meta": {
+                "alpha": cfg.alpha,
+                "beta": cfg.beta,
+                "k_p": cfg.k_p,
+                "k_i": cfg.k_i,
+                "k_d": cfg.k_d,
+                "target": cfg.target_load
+            }
+        })
+        .to_string()
+    }
+
+    pub fn set_trs_target(&mut self, target: f32) -> String {
+        self.trs.set_target(target);
+        let applied = self.trs.target_load;
+        self.emit(EventDelta::TrsTarget(TrsTargetDelta {
+            target_load: applied,
+        }));
+        json!({
+            "ev": "trs_target",
+            "meta": { "target": applied }
+        })
+        .to_string()
+    }
+
+    pub fn apply_trs_output(
+        &mut self,
+        now_ms: u64,
+        observed_load: f32,
+        output: &TrsOutput,
+    ) -> Vec<String> {
+        self.harmony.alpha = output.alpha_new.clamp(0.05, 0.95);
+        self.harmony.affinity_scale = output.affinity_scale.clamp(0.7, 1.35);
+        self.harmony.metabolism_scale = output.metabolism_scale.clamp(0.5, 1.5);
+        self.harmony.sleep_delta = output.sleep_threshold_delta.clamp(-0.2, 0.2);
+
+        let trace = json!({
+            "ev": "trs_trace",
+            "meta": {
+                "alpha": self.harmony.alpha,
+                "err": self.trs.last_err,
+                "observed": observed_load,
+                "tick_adj": output.tick_adjust_ms
+            }
+        })
+        .to_string();
+        self.emit(EventDelta::TrsTrace(TrsTraceDelta {
+            now_ms,
+            observed_load,
+            error: self.trs.last_err,
+            tick_adjust_ms: output.tick_adjust_ms,
+            alpha: self.harmony.alpha,
+        }));
+
+        let harmony = json!({
+            "ev": "harmony",
+            "meta": {
+                "alpha": self.harmony.alpha,
+                "aff_scale": self.harmony.affinity_scale,
+                "met_scale": self.harmony.metabolism_scale,
+                "sleep_delta": self.harmony.sleep_delta
+            }
+        })
+        .to_string();
+        self.emit(EventDelta::TrsHarmony(TrsHarmonyDelta {
+            alpha: self.harmony.alpha,
+            affinity_scale: self.harmony.affinity_scale,
+            metabolism_scale: self.harmony.metabolism_scale,
+            sleep_delta: self.harmony.sleep_delta,
+        }));
+
+        vec![trace, harmony]
     }
 
     fn emit(&self, delta: EventDelta) {
@@ -626,7 +739,7 @@ impl ClusterField {
             .into_iter()
             .filter_map(|id| {
                 self.cells.get(&id).map(|cell| {
-                    let mut score = score_cell(cell, &imp);
+                    let mut score = score_cell(cell, &imp, self.harmony.affinity_scale);
                     let mut best_bias = 1.0f32;
                     for token in &tokens {
                         if let Some(bias) = self.route_bias.get(&(token.clone(), id)) {
@@ -682,7 +795,12 @@ impl ClusterField {
         let mut pending_events: Vec<EventDelta> = Vec::new();
         for id in &ids {
             if let Some(cell) = self.cells.get_mut(id) {
-                cell.tick(dt_ms);
+                cell.tick(
+                    dt_ms,
+                    self.harmony.metabolism_scale,
+                    self.harmony.sleep_delta,
+                );
+                cell.drift_affinity(self.harmony.alpha);
                 pending_events.push(EventDelta::Energy(EnergyDelta {
                     id: *id,
                     energy: cell.energy,
@@ -746,7 +864,7 @@ impl ClusterField {
         for id in ids {
             if let Some(cell) = self.cells.get_mut(&id) {
                 let prev_state = cell.state;
-                let died = cell.maybe_sleep_or_die(self.now_ms);
+                let died = cell.maybe_sleep_or_die(self.now_ms, self.harmony.sleep_delta);
                 if prev_state != NodeState::Sleep && cell.state == NodeState::Sleep {
                     events.push(format!("SLEEP n{}", id));
                     pending_events.push(EventDelta::Sleep(StateDelta { id }));
@@ -937,6 +1055,24 @@ impl ClusterField {
                 self.rules.remove(id);
             }
             EventDelta::ReflexFire(_fire) => {}
+            EventDelta::TrsSet(cfg) => {
+                self.trs.apply_config(cfg);
+                self.harmony.alpha = self.trs.alpha;
+            }
+            EventDelta::TrsTarget(delta) => {
+                self.trs.set_target(delta.target_load);
+            }
+            EventDelta::TrsTrace(trace) => {
+                self.trs.last_err = trace.error;
+                self.trs.last_ts = trace.now_ms;
+                self.harmony.alpha = trace.alpha;
+            }
+            EventDelta::TrsHarmony(delta) => {
+                self.harmony.alpha = delta.alpha;
+                self.harmony.affinity_scale = delta.affinity_scale;
+                self.harmony.metabolism_scale = delta.metabolism_scale;
+                self.harmony.sleep_delta = delta.sleep_delta;
+            }
         }
     }
 }
@@ -1147,10 +1283,79 @@ mod tests {
             })
             .unwrap_or(0)
     }
+
+    #[test]
+    fn sleep_threshold_delta_keeps_cells_awake() {
+        let mut baseline = ClusterField::new();
+        let id = baseline.add_root("liminal/idle");
+        {
+            let cell = baseline.cells.get_mut(&id).unwrap();
+            cell.state = NodeState::Idle;
+            cell.energy = 0.12;
+            cell.last_response_ms = 0;
+        }
+        baseline.now_ms = 5_000;
+        baseline.tick_all(200);
+        assert!(matches!(
+            baseline.cells.get(&id).unwrap().state,
+            NodeState::Sleep
+        ));
+
+        let mut tuned = ClusterField::new();
+        let id_tuned = tuned.add_root("liminal/idle");
+        {
+            let cell = tuned.cells.get_mut(&id_tuned).unwrap();
+            cell.state = NodeState::Idle;
+            cell.energy = 0.12;
+            cell.last_response_ms = 0;
+        }
+        tuned.now_ms = 5_000;
+        let output = TrsOutput {
+            alpha_new: 0.3,
+            tick_adjust_ms: 0,
+            affinity_scale: 1.0,
+            metabolism_scale: 1.0,
+            sleep_threshold_delta: 0.12,
+        };
+        tuned.apply_trs_output(0, 0.4, &output);
+        tuned.tick_all(200);
+        assert!(
+            !matches!(tuned.cells.get(&id_tuned).unwrap().state, NodeState::Sleep),
+            "positive sleep delta should keep cell awake"
+        );
+    }
+
+    #[test]
+    fn affinity_scale_increases_match_scores() {
+        let mut cell = NodeCell::from_seed(
+            1,
+            SeedParams {
+                affinity: 0.85,
+                base_metabolism: 0.2,
+                core_pattern: "liminal/test".into(),
+            },
+        );
+        cell.affinity = 0.86;
+        cell.state = NodeState::Active;
+        let impulse = Impulse {
+            kind: ImpulseKind::Query,
+            pattern: "liminal/test".into(),
+            strength: 0.88,
+            ttl_ms: 1000,
+            tags: Vec::new(),
+        };
+        let base = score_cell(&cell, &impulse, 1.0);
+        let boosted = score_cell(&cell, &impulse, 1.3);
+        assert!(boosted > base);
+    }
 }
 
-fn score_cell(cell: &NodeCell, imp: &Impulse) -> f32 {
-    let affinity_score = 1.0 - (cell.affinity - imp.strength).abs();
+fn score_cell(cell: &NodeCell, imp: &Impulse, affinity_scale: f32) -> f32 {
+    let match_score = 1.0 - (cell.affinity - imp.strength).abs();
+    let mut affinity_score = match_score;
+    if match_score > 0.6 {
+        affinity_score *= affinity_scale.clamp(0.5, 1.5);
+    }
     let state_bonus = match cell.state {
         NodeState::Active => 0.2,
         NodeState::Idle => 0.0,

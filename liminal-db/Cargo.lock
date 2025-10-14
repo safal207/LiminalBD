@@ -218,6 +218,7 @@ dependencies = [
  "liminal-store",
  "serde",
  "serde_cbor",
+ "serde_json",
  "tokio",
  "wasm-bindgen",
 ]
@@ -246,6 +247,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
