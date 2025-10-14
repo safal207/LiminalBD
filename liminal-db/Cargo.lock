@@ -153,13 +153,10 @@ dependencies = [
 name = "liminal-sensor"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "liminal-core",
  "rand",
  "rand_chacha",
- "serde",
  "sysinfo",
- "thiserror",
  "tokio",
 ]
 

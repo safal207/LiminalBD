@@ -105,6 +105,7 @@ impl ClusterField {
                     let new_id = self.next_id;
                     self.next_id += 1;
                     child.id = new_id;
+                    child.seed.core_pattern = format!("{}:n{}", child.seed.core_pattern, new_id);
                     child.last_response_ms = self.now_ms;
                     events.push(format!(
                         "DIVIDE parent=n{} -> child=n{} (aff {:.2}->{:.2})",
@@ -135,7 +136,11 @@ impl ClusterField {
                 }
             }
         }
+        let before_trim = self.cells.len();
         self.cells.retain(|_, cell| cell.state != NodeState::Dead);
+        if self.cells.len() != before_trim {
+            needs_reindex = true;
+        }
         if needs_reindex {
             self.rebuild_index();
         }
@@ -152,12 +157,17 @@ impl ClusterField {
     }
 
     pub fn inject_seed_variation(&mut self, base_seed: &str) {
+        if self.cells.len() > 64 {
+            return;
+        }
         let mut rng = rand::thread_rng();
         let params = create_seed(base_seed);
         let mut cell = NodeCell::from_seed(self.next_id, params.clone());
         cell.affinity = (params.affinity + rng.gen_range(-0.1..0.1)).clamp(0.0, 1.0);
+        cell.seed.affinity = cell.affinity;
         cell.energy = 0.5 + rng.gen_range(0.0..0.3);
         cell.last_response_ms = self.now_ms;
+        cell.seed.core_pattern = format!("{}:bud{}", params.core_pattern, self.next_id);
         let id = cell.id;
         self.next_id += 1;
         self.attach_cell(cell);
@@ -186,7 +196,7 @@ impl ClusterField {
 
 fn tokenize(input: &str) -> Vec<String> {
     input
-        .split(|c: char| !c.is_alphanumeric() && c != '/' && c != '_')
+        .split(|c| matches!(c, '/' | ':' | '.'))
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect()

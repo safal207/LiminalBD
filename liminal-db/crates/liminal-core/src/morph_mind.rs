@@ -38,13 +38,13 @@ pub fn hints(metrics: &Metrics) -> Vec<Hint> {
     if metrics.avg_latency_ms > 150.0 {
         advice.push(Hint::FastTick);
     }
+    let mut rng = rand::thread_rng();
     if metrics.cells < 3 {
-        advice.push(Hint::WakeSeeds);
-    } else if metrics.sleeping_pct > 0.6 {
-        let mut rng = rand::thread_rng();
-        if rng.gen_bool(0.25) {
+        if rng.gen_bool(0.6) {
             advice.push(Hint::WakeSeeds);
         }
+    } else if metrics.sleeping_pct > 0.6 && rng.gen_bool(0.25) {
+        advice.push(Hint::WakeSeeds);
     }
     advice
 }
