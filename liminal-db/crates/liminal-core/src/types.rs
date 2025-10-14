@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ImpulseKind {
     Query,
     Write,

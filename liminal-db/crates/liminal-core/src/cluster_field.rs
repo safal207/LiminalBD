@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::Rng;
@@ -9,8 +9,9 @@ use crate::journal::{
     StateDelta, TickDelta,
 };
 use crate::node_cell::NodeCell;
+use crate::reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule};
 use crate::seed::{create_seed, SeedParams};
-use crate::types::{Impulse, NodeId, NodeState};
+use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
 
 pub type FieldEvents = Vec<String>;
 
@@ -19,10 +20,15 @@ pub struct ClusterField {
     pub index: HashMap<String, Vec<NodeId>>,
     pub now_ms: u64,
     pub next_id: NodeId,
+    pub rules: HashMap<ReflexId, ReflexRule>,
+    pub next_reflex_id: ReflexId,
+    pub counters: HashMap<(String, ImpulseKind), VecDeque<(u64, f32)>>,
     journal: Option<Arc<dyn Journal + Send + Sync>>,
     ticks_since_impulse: u64,
     link_usage: HashMap<(NodeId, NodeId), LinkStat>,
     route_usage: HashMap<(NodeId, NodeId), RouteStat>,
+    route_bias: HashMap<(String, NodeId), f32>,
+    recent_routes: HashMap<String, VecDeque<NodeId>>,
     sleeping_accum_ms: u64,
     last_dream_ms: u64,
 }
@@ -34,12 +40,17 @@ impl ClusterField {
             index: HashMap::new(),
             now_ms: 0,
             next_id: 1,
+            rules: HashMap::new(),
+            next_reflex_id: 1,
+            counters: HashMap::new(),
             journal: None,
             ticks_since_impulse: 0,
             link_usage: HashMap::new(),
             route_usage: HashMap::new(),
             sleeping_accum_ms: 0,
             last_dream_ms: 0,
+            route_bias: HashMap::new(),
+            recent_routes: HashMap::new(),
         }
     }
 
@@ -346,8 +357,262 @@ impl ClusterField {
         id
     }
 
+    pub fn add_reflex(&mut self, mut rule: ReflexRule) -> ReflexId {
+        let id = if rule.id == 0 {
+            let id = self.next_reflex_id;
+            self.next_reflex_id += 1;
+            id
+        } else {
+            self.next_reflex_id = self.next_reflex_id.max(rule.id + 1);
+            rule.id
+        };
+        rule.id = id;
+        rule.when.token = rule.when.token.trim().to_lowercase();
+        rule.when.min_strength = rule.when.min_strength.clamp(0.0, 1.0);
+        self.rules.insert(id, rule.clone());
+        self.emit(EventDelta::ReflexAdd(rule));
+        id
+    }
+
+    pub fn remove_reflex(&mut self, id: ReflexId) -> bool {
+        let removed = self.rules.remove(&id).is_some();
+        if removed {
+            self.emit(EventDelta::ReflexRemove { id });
+        }
+        removed
+    }
+
+    pub fn list_reflex(&self) -> Vec<ReflexRule> {
+        let mut rules = self.rules.values().cloned().collect::<Vec<_>>();
+        rules.sort_by_key(|rule| rule.id);
+        rules
+    }
+
+    fn process_reflex_for(
+        &mut self,
+        token: &str,
+        imp: &Impulse,
+        logs: &mut Vec<String>,
+        fired: &mut HashSet<ReflexId>,
+    ) {
+        let normalized = token.to_lowercase();
+        let relevant_rules: Vec<ReflexRule> = self
+            .rules
+            .values()
+            .filter(|rule| {
+                rule.enabled
+                    && rule.when.kind == imp.kind
+                    && reflex_token_matches(&rule.when.token, &normalized)
+            })
+            .cloned()
+            .collect();
+        let key = (normalized.clone(), imp.kind.clone());
+        let retention = relevant_rules
+            .iter()
+            .map(|rule| rule.when.window_ms as u64)
+            .max()
+            .unwrap_or(2_000)
+            .max(1);
+        {
+            let queue = self
+                .counters
+                .entry(key.clone())
+                .or_insert_with(VecDeque::new);
+            queue.push_back((self.now_ms, imp.strength));
+            while let Some((ts, _)) = queue.front() {
+                if self.now_ms.saturating_sub(*ts) > retention {
+                    queue.pop_front();
+                } else {
+                    break;
+                }
+            }
+            while queue.len() > 256 {
+                queue.pop_front();
+            }
+        }
+        if relevant_rules.is_empty() {
+            return;
+        }
+        let Some(queue_snapshot) = self.counters.get(&key).cloned() else {
+            return;
+        };
+        let mut pending: Vec<(ReflexRule, u16)> = Vec::new();
+        for rule in relevant_rules {
+            if fired.contains(&rule.id) {
+                continue;
+            }
+            let matched = queue_snapshot
+                .iter()
+                .filter(|(ts, strength)| {
+                    self.now_ms.saturating_sub(*ts) <= rule.when.window_ms as u64
+                        && *strength >= rule.when.min_strength
+                })
+                .count() as u16;
+            if matched >= rule.when.min_count {
+                pending.push((rule, matched));
+            }
+        }
+        for (rule, matched) in pending {
+            self.fire_reflex(&rule, matched, &normalized, logs);
+            fired.insert(rule.id);
+        }
+    }
+
+    fn fire_reflex(
+        &mut self,
+        rule: &ReflexRule,
+        matched: u16,
+        token: &str,
+        logs: &mut Vec<String>,
+    ) {
+        let fire = ReflexFire {
+            id: rule.id,
+            at_ms: self.now_ms,
+            matched,
+        };
+        logs.push(format!("REFLEX_FIRE id={} matched={}", rule.id, matched));
+        self.emit(EventDelta::ReflexFire(fire));
+        match &rule.then {
+            ReflexAction::EmitHint { hint } => {
+                logs.push(format!("REFLEX_HINT id={} hint={:?}", rule.id, hint));
+            }
+            ReflexAction::SpawnSeed {
+                seed,
+                affinity_shift,
+            } => {
+                self.perform_spawn_seed(rule.id, seed, *affinity_shift, logs);
+            }
+            ReflexAction::WakeSleeping { count } => {
+                self.perform_wake_sleeping(rule.id, *count, token, logs);
+            }
+            ReflexAction::BoostLinks { factor, top } => {
+                self.perform_boost_links(rule.id, token, *factor, *top, logs);
+            }
+        }
+    }
+
+    fn perform_spawn_seed(
+        &mut self,
+        rule_id: ReflexId,
+        seed: &str,
+        affinity_shift: f32,
+        logs: &mut Vec<String>,
+    ) {
+        let mut params = create_seed(seed);
+        params.affinity = (params.affinity + affinity_shift).clamp(0.0, 1.0);
+        let new_id = self.next_id;
+        self.next_id += 1;
+        let mut cell = NodeCell::from_seed(new_id, params);
+        cell.affinity = cell.affinity.clamp(0.0, 1.0);
+        cell.seed.affinity = cell.affinity;
+        let snapshot = CellSnapshot::from(&cell);
+        self.attach_cell(cell);
+        self.emit(EventDelta::Spawn(snapshot));
+        logs.push(format!(
+            "REFLEX_SPAWN id={} node=n{} seed={} shift={:.2}",
+            rule_id, new_id, seed, affinity_shift
+        ));
+    }
+
+    fn perform_wake_sleeping(
+        &mut self,
+        rule_id: ReflexId,
+        count: u16,
+        token: &str,
+        logs: &mut Vec<String>,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let mut sleeping: Vec<(f32, NodeId)> = self
+            .cells
+            .iter()
+            .filter_map(|(id, cell)| {
+                if cell.state == NodeState::Sleep {
+                    Some((wake_priority(cell, token), *id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        sleeping.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let mut woke = 0u16;
+        for (_priority, node_id) in sleeping.into_iter().take(count as usize) {
+            if let Some(cell) = self.cells.get_mut(&node_id) {
+                if cell.state == NodeState::Sleep {
+                    cell.state = NodeState::Idle;
+                    cell.energy = cell.energy.max(0.3);
+                    cell.last_response_ms = self.now_ms;
+                    let delta = EventDelta::Energy(EnergyDelta {
+                        id: node_id,
+                        energy: cell.energy,
+                        metabolism: cell.metabolism,
+                        state: cell.state,
+                        last_response_ms: cell.last_response_ms,
+                    });
+                    self.emit(delta);
+                    woke = woke.saturating_add(1);
+                }
+            }
+        }
+        logs.push(format!(
+            "REFLEX_WAKE id={} requested={} woke={}",
+            rule_id, count, woke
+        ));
+    }
+
+    fn perform_boost_links(
+        &mut self,
+        rule_id: ReflexId,
+        token: &str,
+        factor: f32,
+        top: u16,
+        logs: &mut Vec<String>,
+    ) {
+        if top == 0 {
+            logs.push(format!(
+                "REFLEX_BOOST id={} top={} factor={:.2} boosted=0",
+                rule_id, top, factor
+            ));
+            return;
+        }
+        let normalized = token.to_lowercase();
+        let history = self.recent_routes.entry(normalized.clone()).or_default();
+        let mut counts: HashMap<NodeId, u32> = HashMap::new();
+        for &node in history.iter().rev().take(64) {
+            *counts.entry(node).or_insert(0) += 1;
+        }
+        let mut ranked: Vec<(u32, NodeId)> = counts
+            .into_iter()
+            .map(|(node, count)| (count, node))
+            .collect();
+        ranked.sort_by(|a, b| b.cmp(a));
+        let mut boosted = 0u16;
+        for (_count, node_id) in ranked.into_iter().take(top as usize) {
+            let entry = self
+                .route_bias
+                .entry((normalized.clone(), node_id))
+                .or_insert(1.0);
+            let factor = factor.clamp(0.1, 3.0);
+            *entry = (*entry * factor).clamp(0.2, 5.0);
+            boosted = boosted.saturating_add(1);
+        }
+        logs.push(format!(
+            "REFLEX_BOOST id={} top={} factor={:.2} boosted={}",
+            rule_id, top, factor, boosted
+        ));
+    }
+
     pub fn route_impulse(&mut self, imp: Impulse) -> Vec<String> {
         let tokens = tokenize(&imp.pattern);
+        let mut seen_tokens = HashSet::new();
+        let mut logs = Vec::new();
+        let mut fired_rules = HashSet::new();
+        for token in tokens.iter().cloned() {
+            if seen_tokens.insert(token.clone()) {
+                self.process_reflex_for(&token, &imp, &mut logs, &mut fired_rules);
+            }
+        }
         let mut candidates: HashSet<NodeId> = HashSet::new();
         for token in &tokens {
             if let Some(ids) = self.index.get(token) {
@@ -359,10 +624,23 @@ impl ClusterField {
         }
         let mut scored: Vec<(f32, NodeId)> = candidates
             .into_iter()
-            .filter_map(|id| self.cells.get(&id).map(|cell| (score_cell(cell, &imp), id)))
+            .filter_map(|id| {
+                self.cells.get(&id).map(|cell| {
+                    let mut score = score_cell(cell, &imp);
+                    let mut best_bias = 1.0f32;
+                    for token in &tokens {
+                        if let Some(bias) = self.route_bias.get(&(token.clone(), id)) {
+                            if *bias > best_bias {
+                                best_bias = *bias;
+                            }
+                        }
+                    }
+                    score *= best_bias;
+                    (score, id)
+                })
+            })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut logs = Vec::new();
         let mut responded: Vec<NodeId> = Vec::new();
         for (_score, id) in scored.into_iter().take(3) {
             if let Some(cell) = self.cells.get_mut(&id) {
@@ -382,6 +660,15 @@ impl ClusterField {
             }
         }
         self.record_route_sequence(&responded);
+        for token in seen_tokens {
+            let history = self.recent_routes.entry(token).or_default();
+            for &id in &responded {
+                history.push_back(id);
+            }
+            while history.len() > 64 {
+                history.pop_front();
+            }
+        }
         self.ticks_since_impulse = 0;
         logs
     }
@@ -640,6 +927,16 @@ impl ClusterField {
                     cell.last_response_ms = delta.last_response_ms;
                 }
             }
+            EventDelta::ReflexAdd(rule) => {
+                let mut rule = rule.clone();
+                rule.when.token = rule.when.token.to_lowercase();
+                self.next_reflex_id = self.next_reflex_id.max(rule.id + 1);
+                self.rules.insert(rule.id, rule);
+            }
+            EventDelta::ReflexRemove { id } => {
+                self.rules.remove(id);
+            }
+            EventDelta::ReflexFire(_fire) => {}
         }
     }
 }
@@ -650,6 +947,25 @@ fn tokenize(input: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect()
+}
+
+fn wake_priority(cell: &NodeCell, token: &str) -> f32 {
+    let token_lower = token.to_lowercase();
+    let core_tokens = tokenize(&cell.seed.core_pattern);
+    if core_tokens.iter().any(|existing| existing == &token_lower) {
+        0.0
+    } else {
+        (cell.affinity - 0.5).abs() + 0.5
+    }
+}
+
+fn reflex_token_matches(rule_token: &str, token: &str) -> bool {
+    if rule_token == token {
+        return true;
+    }
+    tokenize(rule_token)
+        .iter()
+        .any(|candidate| candidate == token)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -667,6 +983,86 @@ struct RouteStat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reflex::ReflexWhen;
+    use crate::types::Hint;
+
+    #[test]
+    fn reflex_fire_on_window_threshold() {
+        let mut field = ClusterField::new();
+        field.add_root("liminal/test");
+        let rule = ReflexRule {
+            id: 0,
+            when: ReflexWhen {
+                token: "cpu/load".into(),
+                kind: ImpulseKind::Affect,
+                min_strength: 0.7,
+                window_ms: 1_000,
+                min_count: 5,
+            },
+            then: ReflexAction::EmitHint {
+                hint: Hint::SlowTick,
+            },
+            enabled: true,
+        };
+        field.add_reflex(rule);
+        for i in 0..5 {
+            field.now_ms = (i * 200) as u64;
+            let logs = field.route_impulse(Impulse {
+                kind: ImpulseKind::Affect,
+                pattern: "cpu/load".into(),
+                strength: 0.8,
+                ttl_ms: 1_000,
+                tags: Vec::new(),
+            });
+            if i < 4 {
+                assert!(
+                    !logs.iter().any(|log| log.contains("REFLEX_FIRE")),
+                    "reflex should not fire before threshold"
+                );
+            } else {
+                assert!(
+                    logs.iter().any(|log| log.contains("REFLEX_FIRE")),
+                    "reflex should fire on fifth impulse"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remove_reflex_disables_rule() {
+        let mut field = ClusterField::new();
+        let id = field.add_reflex(ReflexRule {
+            id: 0,
+            when: ReflexWhen {
+                token: "cpu/load".into(),
+                kind: ImpulseKind::Affect,
+                min_strength: 0.5,
+                window_ms: 500,
+                min_count: 2,
+            },
+            then: ReflexAction::EmitHint {
+                hint: Hint::FastTick,
+            },
+            enabled: true,
+        });
+        assert_eq!(field.list_reflex().len(), 1);
+        assert!(field.remove_reflex(id));
+        assert!(field.list_reflex().is_empty());
+        for i in 0..3 {
+            field.now_ms = (i * 200) as u64;
+            let logs = field.route_impulse(Impulse {
+                kind: ImpulseKind::Affect,
+                pattern: "cpu/load".into(),
+                strength: 0.9,
+                ttl_ms: 1_000,
+                tags: Vec::new(),
+            });
+            assert!(
+                !logs.iter().any(|log| log.contains("REFLEX_FIRE")),
+                "removed reflex should not fire"
+            );
+        }
+    }
 
     #[test]
     fn dream_session_reconfigures_field() {
