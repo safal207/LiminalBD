@@ -9,8 +9,12 @@ use serde_cbor::Value;
 pub struct BridgeConfig {
     #[serde(rename = "tick_ms")]
     pub tick_ms: u32,
-    #[serde(rename = "store", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "store_path", skip_serializing_if = "Option::is_none")]
     pub store_path: Option<String>,
+    #[serde(rename = "snap_interval", skip_serializing_if = "Option::is_none")]
+    pub snap_interval: Option<u32>,
+    #[serde(rename = "snap_maxwal", skip_serializing_if = "Option::is_none")]
+    pub snap_maxwal: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,6 +208,17 @@ pub fn event_from_impulse_log(log: &str) -> Option<ProtocolEvent> {
         });
     }
     None
+}
+
+pub fn event_from_snapshot(id: u64) -> ProtocolEvent {
+    let mut meta = BTreeMap::new();
+    meta.insert("id".into(), Value::Integer(id as i128));
+    ProtocolEvent {
+        ev: "snapshot".into(),
+        id: id.into(),
+        dt: 0,
+        meta,
+    }
 }
 
 pub fn event_from_hint(hint: &Hint, tick_ms: u32) -> ProtocolEvent {

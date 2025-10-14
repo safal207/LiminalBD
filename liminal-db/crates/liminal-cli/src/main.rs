@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use hex::encode as encode_hex;
@@ -11,7 +12,8 @@ use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::ClusterField;
 use liminal_sensor::start_host_sensors;
-use liminal_store::{decode_delta, DiskJournal, Offset};
+use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
@@ -21,6 +23,8 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut pipe_cbor = false;
     let mut store_path: Option<PathBuf> = None;
+    let mut snap_interval_secs: u64 = 60;
+    let mut snap_maxwal: u64 = 5_000;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pipe-cbor" => pipe_cbor = true,
@@ -30,20 +34,55 @@ async fn main() -> Result<()> {
                 };
                 store_path = Some(PathBuf::from(path));
             }
+            "--snap-interval" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--snap-interval requires seconds"));
+                };
+                snap_interval_secs = value.parse::<u64>().map_err(|_| {
+                    anyhow!("--snap-interval expects positive seconds, got {value}")
+                })?;
+                if snap_interval_secs == 0 {
+                    return Err(anyhow!("--snap-interval must be greater than zero"));
+                }
+            }
+            "--snap-maxwal" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--snap-maxwal requires a number"));
+                };
+                snap_maxwal = value
+                    .parse::<u64>()
+                    .map_err(|_| anyhow!("--snap-maxwal expects a number, got {value}"))?;
+                if snap_maxwal == 0 {
+                    return Err(anyhow!("--snap-maxwal must be greater than zero"));
+                }
+            }
             other => return Err(anyhow!("unknown argument: {other}")),
         }
     }
 
+    let store_config = store_path.map(|path| StoreRuntimeConfig {
+        path,
+        snap_interval: Duration::from_secs(snap_interval_secs),
+        max_wal_events: snap_maxwal,
+    });
+
     if pipe_cbor {
-        run_pipe_cbor(store_path).await
+        run_pipe_cbor(store_config).await
     } else {
-        run_interactive(store_path).await
+        run_interactive(store_config).await
     }
 }
 
-async fn run_interactive(store_path: Option<PathBuf>) -> Result<()> {
-    let (field, journal) = if let Some(path) = store_path {
-        let journal = StdArc::new(DiskJournal::open(&path)?);
+#[derive(Clone)]
+struct StoreRuntimeConfig {
+    path: PathBuf,
+    snap_interval: Duration,
+    max_wal_events: u64,
+}
+
+async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
+    let (field, journal, store_cfg) = if let Some(cfg) = store.clone() {
+        let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
         let (mut field, replay_offset) =
             if let Some((seed, offset)) = journal.load_latest_snapshot()? {
                 (seed.into_field(), offset)
@@ -60,17 +99,42 @@ async fn run_interactive(store_path: Option<PathBuf>) -> Result<()> {
             field.add_root("liminal/root");
         }
         field.set_journal(journal.clone());
-        (field, Some(journal))
+        (field, Some(journal), Some(cfg))
     } else {
         let mut field = ClusterField::new();
         field.add_root("liminal/root");
-        (field, None)
+        (field, None, None)
     };
     let field = StdArc::new(Mutex::new(field));
 
     let (tx, mut rx) = mpsc::channel::<Impulse>(128);
 
     tokio::spawn(start_host_sensors(tx.clone()));
+
+    if let (Some(journal_arc), Some(cfg)) = (journal.clone(), store_cfg.clone()) {
+        let field_for_snap = field.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            let mut last_snapshot = Instant::now();
+            loop {
+                ticker.tick().await;
+                if journal_arc.delta_since_snapshot() >= cfg.max_wal_events
+                    || last_snapshot.elapsed() >= cfg.snap_interval
+                {
+                    match snapshot_once(&field_for_snap, &journal_arc).await {
+                        Ok(info) => {
+                            last_snapshot = Instant::now();
+                            if let Err(err) = journal_arc.run_gc(info.offset) {
+                                eprintln!("snapshot GC failed: {err}");
+                            }
+                            log_snapshot("AUTO-", &info);
+                        }
+                        Err(err) => eprintln!("auto snapshot failed: {err}"),
+                    }
+                }
+            }
+        });
+    }
 
     let field_for_impulses = field.clone();
     tokio::spawn(async move {
@@ -131,30 +195,49 @@ async fn run_interactive(store_path: Option<PathBuf>) -> Result<()> {
             if trimmed.is_empty() {
                 continue;
             }
-            if trimmed.eq_ignore_ascii_case("snapshot") {
-                if let Some(journal) = &journal_for_cli {
-                    let result = {
-                        let guard = field_for_cli.lock().await;
-                        journal.write_snapshot(&*guard)
-                    };
-                    match result {
-                        Ok((path, offset)) => {
-                            if let Err(err) = journal.run_gc(offset) {
-                                eprintln!("snapshot GC failed: {err}");
+            if let Some(rest) = trimmed.strip_prefix(':') {
+                match rest {
+                    "snapshot" => {
+                        if let Some(journal) = &journal_for_cli {
+                            match snapshot_once(&field_for_cli, journal).await {
+                                Ok(info) => {
+                                    if let Err(err) = journal.run_gc(info.offset) {
+                                        eprintln!("snapshot GC failed: {err}");
+                                    }
+                                    log_snapshot("", &info);
+                                }
+                                Err(err) => eprintln!("snapshot failed: {err}"),
                             }
-                            println!(
-                                "SNAPSHOT saved {} (segment={} position={})",
-                                path.display(),
-                                offset.segment,
-                                offset.position
-                            );
-                        }
-                        Err(err) => {
-                            eprintln!("snapshot failed: {err}");
+                        } else {
+                            eprintln!("storage not configured; use --store to enable snapshots");
                         }
                     }
-                } else {
-                    eprintln!("storage not configured; use --store to enable snapshots");
+                    "stats" => {
+                        if let Some(journal) = &journal_for_cli {
+                            match journal.stats() {
+                                Ok(stats) => print_stats(&stats),
+                                Err(err) => eprintln!("stats unavailable: {err}"),
+                            }
+                        } else {
+                            eprintln!("storage not configured; use --store to enable stats");
+                        }
+                    }
+                    command if command.starts_with("export") => {
+                        let path_arg = command.trim_start_matches("export").trim();
+                        if path_arg.is_empty() {
+                            eprintln!("usage: :export <file>");
+                        } else {
+                            match export_snapshot(&field_for_cli, Path::new(path_arg)).await {
+                                Ok(path) => {
+                                    println!("EXPORTED snapshot -> {}", path.display());
+                                }
+                                Err(err) => eprintln!("export failed: {err}"),
+                            }
+                        }
+                    }
+                    other => {
+                        eprintln!("Unknown command: :{}", other);
+                    }
                 }
                 continue;
             }
@@ -175,10 +258,18 @@ async fn run_interactive(store_path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-async fn run_pipe_cbor(store_path: Option<PathBuf>) -> Result<()> {
+async fn run_pipe_cbor(store: Option<StoreRuntimeConfig>) -> Result<()> {
     let config = BridgeConfig {
         tick_ms: 200,
-        store_path: store_path.map(|p| p.to_string_lossy().to_string()),
+        store_path: store
+            .as_ref()
+            .map(|cfg| cfg.path.to_string_lossy().to_string()),
+        snap_interval: store
+            .as_ref()
+            .map(|cfg| cfg.snap_interval.as_secs().min(u64::from(u32::MAX)) as u32),
+        snap_maxwal: store
+            .as_ref()
+            .map(|cfg| cfg.max_wal_events.min(u32::MAX as u64) as u32),
     };
     let cfg_bytes = serde_cbor::to_vec(&config)?;
     if !liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()) {
@@ -240,6 +331,60 @@ fn drain_outputs(buffer: &mut [u8]) -> Result<()> {
         println!("{}", encode_hex(&buffer[..written]));
     }
     Ok(())
+}
+
+async fn snapshot_once(
+    field: &StdArc<Mutex<ClusterField>>,
+    journal: &StdArc<DiskJournal>,
+) -> Result<SnapshotInfo> {
+    let guard = field.lock().await;
+    journal.write_snapshot(&*guard)
+}
+
+fn log_snapshot(prefix: &str, info: &SnapshotInfo) {
+    println!(
+        "{}SNAPSHOT id={} size={}B path={} segment={} position={}",
+        prefix,
+        info.id,
+        info.size_bytes,
+        info.path.display(),
+        info.offset.segment,
+        info.offset.position
+    );
+}
+
+fn print_stats(stats: &StoreStats) {
+    println!(
+        "STATS wal_segment={} position={} delta_since_snapshot={} last_snapshot={:?} segments={:?}",
+        stats.current_segment,
+        stats.current_position,
+        stats.delta_since_snapshot,
+        stats.last_snapshot,
+        stats.wal_segments
+    );
+}
+
+async fn export_snapshot(field: &StdArc<Mutex<ClusterField>>, path: &Path) -> Result<PathBuf> {
+    let snapshot_json = {
+        let guard = field.lock().await;
+        json!({
+            "now_ms": guard.now_ms,
+            "next_id": guard.next_id,
+            "cells": guard
+                .cells
+                .values()
+                .map(liminal_core::journal::CellSnapshot::from)
+                .collect::<Vec<_>>(),
+        })
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let pretty = serde_json::to_string_pretty(&snapshot_json)?;
+    fs::write(path, pretty)?;
+    Ok(path.to_path_buf())
 }
 
 fn parse_command(line: &str) -> Option<Impulse> {

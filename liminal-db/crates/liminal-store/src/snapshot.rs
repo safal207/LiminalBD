@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use liminal_core::{CellSnapshot, ClusterField, NodeCell, SeedParams};
 use serde::{Deserialize, Serialize};
@@ -21,16 +19,13 @@ pub struct ClusterFieldSeed {
 impl ClusterFieldSeed {
     pub fn into_field(self) -> ClusterField {
         let mut field = ClusterField::new();
-        let mut cells = HashMap::new();
         for snapshot in &self.cells {
             let cell = snapshot_to_node(snapshot);
-            cells.insert(cell.id, cell);
+            field.cells.insert(cell.id, cell);
         }
-        let index = rebuild_index(&cells);
-        field.cells = cells;
-        field.index = index;
         field.now_ms = self.now_ms;
         field.next_id = self.next_id;
+        field.rebuild_caches();
         field
     }
 }
@@ -76,21 +71,22 @@ fn snapshot_to_node(snapshot: &CellSnapshot) -> NodeCell {
     cell
 }
 
-fn rebuild_index(cells: &HashMap<u64, NodeCell>) -> HashMap<String, Vec<u64>> {
-    let mut index: HashMap<String, Vec<u64>> = HashMap::new();
-    for (id, cell) in cells {
-        let tokens = tokenize(&cell.seed.core_pattern);
-        for token in tokens {
-            index.entry(token).or_default().push(*id);
-        }
-    }
-    index
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn tokenize(input: &str) -> Vec<String> {
-    input
-        .split(|c| matches!(c, '/' | ':' | '.'))
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect()
+    #[test]
+    fn snapshot_round_trip() {
+        let mut field = ClusterField::new();
+        field.add_root("liminal/root");
+        field.add_root("liminal/aux");
+        field.tick_all(200);
+        let before = field.cells.len();
+        let bytes = create_snapshot(&field).expect("create snapshot");
+        let seed = load_snapshot(&bytes).expect("load snapshot");
+        let restored = seed.into_field();
+        assert_eq!(restored.cells.len(), before);
+        assert_eq!(restored.now_ms, field.now_ms);
+        assert_eq!(restored.next_id, field.next_id);
+    }
 }
