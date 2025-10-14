@@ -1,0 +1,23 @@
+[package]
+name = "liminal-bridge-abi"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["ffi"]
+ffi = ["tokio"]
+wasm = ["dep:wasm-bindgen", "dep:gloo-timers"]
+
+[dependencies]
+liminal-core = { path = "../liminal-core" }
+serde = { version = "1", features = ["derive"] }
+serde_cbor = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+gloo-timers = { version = "0.2", optional = true }
+
+[dev-dependencies]
+hex = "0.4"

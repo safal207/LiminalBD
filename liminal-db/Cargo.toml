@@ -3,5 +3,6 @@ members = [
     "crates/liminal-core",
     "crates/liminal-sensor",
     "crates/liminal-cli",
+    "crates/liminal-bridge-abi",
 ]
 resolver = "2"
