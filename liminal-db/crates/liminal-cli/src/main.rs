@@ -1,15 +1,30 @@
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use hex::encode as encode_hex;
+use hex::FromHex;
+use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
+use liminal_bridge_abi::protocol::BridgeConfig;
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::ClusterField;
 use liminal_sensor::start_host_sensors;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--pipe-cbor") {
+        run_pipe_cbor().await
+    } else {
+        run_interactive().await
+    }
+}
+
+async fn run_interactive() -> Result<()> {
     let mut field = ClusterField::new();
     field.add_root("liminal/root");
     let field = StdArc::new(Mutex::new(field));
@@ -89,6 +104,70 @@ async fn main() -> Result<()> {
     });
 
     input_task.await?;
+    Ok(())
+}
+
+async fn run_pipe_cbor() -> Result<()> {
+    let config = BridgeConfig { tick_ms: 200 };
+    let cfg_bytes = serde_cbor::to_vec(&config)?;
+    if !liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()) {
+        return Err(anyhow!("failed to initialize liminal bridge"));
+    }
+
+    let mut buffer = vec![0u8; 4096];
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(raw)) => {
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        match Vec::<u8>::from_hex(trimmed) {
+                            Ok(bytes) => {
+                                let result = task::spawn_blocking(move || {
+                                    liminal_push(bytes.as_ptr(), bytes.len())
+                                })
+                                .await
+                                .unwrap_or(0);
+                                if result == 0 {
+                                    eprintln!("bridge rejected impulse");
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!("invalid hex input: {err}");
+                            }
+                        }
+                        drain_outputs(&mut buffer)?;
+                    }
+                    Ok(None) => {
+                        drain_outputs(&mut buffer)?;
+                        break;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                drain_outputs(&mut buffer)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn drain_outputs(buffer: &mut [u8]) -> Result<()> {
+    loop {
+        let written = liminal_pull(buffer.as_mut_ptr(), buffer.len());
+        if written == 0 {
+            break;
+        }
+        println!("{}", encode_hex(&buffer[..written]));
+    }
     Ok(())
 }
 
