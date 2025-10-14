@@ -7,6 +7,7 @@ edition = "2021"
 liminal-core = { path = "../liminal-core" }
 liminal-sensor = { path = "../liminal-sensor" }
 liminal-bridge-abi = { path = "../liminal-bridge-abi" }
+liminal-store = { path = "../liminal-store" }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_cbor = "0.11"

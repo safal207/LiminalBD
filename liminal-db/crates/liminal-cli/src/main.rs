@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -10,23 +11,61 @@ use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::ClusterField;
 use liminal_sensor::start_host_sensors;
+use liminal_store::{decode_delta, DiskJournal, Offset};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--pipe-cbor") {
-        run_pipe_cbor().await
+    let mut args = std::env::args().skip(1);
+    let mut pipe_cbor = false;
+    let mut store_path: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--pipe-cbor" => pipe_cbor = true,
+            "--store" => {
+                let Some(path) = args.next() else {
+                    return Err(anyhow!("--store requires a path"));
+                };
+                store_path = Some(PathBuf::from(path));
+            }
+            other => return Err(anyhow!("unknown argument: {other}")),
+        }
+    }
+
+    if pipe_cbor {
+        run_pipe_cbor(store_path).await
     } else {
-        run_interactive().await
+        run_interactive(store_path).await
     }
 }
 
-async fn run_interactive() -> Result<()> {
-    let mut field = ClusterField::new();
-    field.add_root("liminal/root");
+async fn run_interactive(store_path: Option<PathBuf>) -> Result<()> {
+    let (field, journal) = if let Some(path) = store_path {
+        let journal = StdArc::new(DiskJournal::open(&path)?);
+        let (mut field, replay_offset) =
+            if let Some((seed, offset)) = journal.load_latest_snapshot()? {
+                (seed.into_field(), offset)
+            } else {
+                (ClusterField::new(), Offset::start())
+            };
+        let mut stream = journal.stream_from(replay_offset)?;
+        while let Some(record) = stream.next() {
+            let bytes = record?;
+            let delta = decode_delta(&bytes)?;
+            field.apply_delta(&delta);
+        }
+        if field.cells.is_empty() {
+            field.add_root("liminal/root");
+        }
+        field.set_journal(journal.clone());
+        (field, Some(journal))
+    } else {
+        let mut field = ClusterField::new();
+        field.add_root("liminal/root");
+        (field, None)
+    };
     let field = StdArc::new(Mutex::new(field));
 
     let (tx, mut rx) = mpsc::channel::<Impulse>(128);
@@ -82,12 +121,41 @@ async fn run_interactive() -> Result<()> {
     });
 
     let tx_cli = tx.clone();
+    let journal_for_cli = journal.clone();
+    let field_for_cli = field.clone();
     let input_task = tokio::spawn(async move {
         let stdin = BufReader::new(tokio::io::stdin());
         let mut lines = stdin.lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.eq_ignore_ascii_case("snapshot") {
+                if let Some(journal) = &journal_for_cli {
+                    let result = {
+                        let guard = field_for_cli.lock().await;
+                        journal.write_snapshot(&*guard)
+                    };
+                    match result {
+                        Ok((path, offset)) => {
+                            if let Err(err) = journal.run_gc(offset) {
+                                eprintln!("snapshot GC failed: {err}");
+                            }
+                            println!(
+                                "SNAPSHOT saved {} (segment={} position={})",
+                                path.display(),
+                                offset.segment,
+                                offset.position
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!("snapshot failed: {err}");
+                        }
+                    }
+                } else {
+                    eprintln!("storage not configured; use --store to enable snapshots");
+                }
                 continue;
             }
             match parse_command(trimmed) {
@@ -107,8 +175,11 @@ async fn run_interactive() -> Result<()> {
     Ok(())
 }
 
-async fn run_pipe_cbor() -> Result<()> {
-    let config = BridgeConfig { tick_ms: 200 };
+async fn run_pipe_cbor(store_path: Option<PathBuf>) -> Result<()> {
+    let config = BridgeConfig {
+        tick_ms: 200,
+        store_path: store_path.map(|p| p.to_string_lossy().to_string()),
+    };
     let cfg_bytes = serde_cbor::to_vec(&config)?;
     if !liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()) {
         return Err(anyhow!("failed to initialize liminal bridge"));
