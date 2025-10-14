@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/liminal-core",
+    "crates/liminal-sensor",
+    "crates/liminal-cli",
+]
+resolver = "2"
