@@ -357,3 +357,52 @@ impl Iterator for WalStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn wal_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let mut store = Store::open(dir.path()).expect("open store");
+        let payloads = vec![b"hello".to_vec(), b"world".to_vec(), b"liminal".to_vec()];
+        for payload in &payloads {
+            store.append(payload).expect("append");
+        }
+        let stream = store.stream_from(Offset::start()).expect("stream");
+        let collected: Vec<Vec<u8>> = stream.map(|entry| entry.expect("entry")).collect();
+        assert_eq!(collected, payloads);
+    }
+
+    #[test]
+    fn wal_crc_detects_corruption() {
+        let dir = tempdir().expect("tempdir");
+        let mut store = Store::open(dir.path()).expect("open store");
+        store.append(b"data").expect("append");
+        drop(store);
+
+        // Corrupt the file by flipping a byte in payload
+        let path = dir.path().join("data/00000001.wal");
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open wal");
+        file.seek(SeekFrom::Start(2)).expect("seek");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).expect("read");
+        byte[0] ^= 0xFF;
+        file.seek(SeekFrom::Start(2)).expect("seek back");
+        file.write_all(&byte).expect("write");
+        drop(file);
+
+        let store = Store::open(dir.path()).expect("reopen store");
+        let mut stream = store.stream_from(Offset::start()).expect("stream");
+        assert!(
+            stream.next().unwrap().is_err(),
+            "corruption must be detected"
+        );
+    }
+}
