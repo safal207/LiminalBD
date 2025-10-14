@@ -99,7 +99,7 @@ fn parse_command(line: &str) -> Option<Impulse> {
     let strength = parts
         .next()
         .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(0.5);
+        .unwrap_or(0.6);
 
     let kind = match cmd.to_lowercase().as_str() {
         "q" => ImpulseKind::Query,

@@ -37,6 +37,18 @@ impl NodeCell {
         if self.state == NodeState::Dead {
             return None;
         }
+
+        if !pattern_match(
+            self.affinity,
+            &self.seed.core_pattern,
+            &imp.pattern,
+            imp.strength,
+            &imp.tags,
+        ) {
+            self.energy = (self.energy - 0.01).clamp(0.0, 1.0);
+            return None;
+        }
+
         let (delta, response) = match imp.kind {
             ImpulseKind::Query => {
                 if self.state == NodeState::Sleep && imp.strength > 0.6 {
@@ -66,7 +78,7 @@ impl NodeCell {
                 )
             }
         };
-        self.energy = (self.energy + delta).clamp(0.0, 1.2);
+        self.energy = (self.energy + delta).clamp(0.0, 1.0);
         Some(response)
     }
 
@@ -115,7 +127,7 @@ impl NodeCell {
 
     pub fn maybe_sleep_or_die(&mut self, now_ms: u64) -> bool {
         if self.state == NodeState::Dead {
-            return true;
+            return false;
         }
         let idle_for = now_ms.saturating_sub(self.last_response_ms);
         if self.energy < 0.15 && idle_for > 3_000 {
@@ -127,4 +139,30 @@ impl NodeCell {
         }
         false
     }
+}
+
+fn pattern_match(affinity: f32, core: &str, pattern: &str, strength: f32, tags: &[String]) -> bool {
+    let core_tokens = tokenize(core);
+    let mut pattern_tokens = tokenize(pattern);
+    if pattern_tokens.is_empty() {
+        pattern_tokens = tags.iter().map(|t| t.to_lowercase()).collect();
+    } else {
+        pattern_tokens.extend(tags.iter().map(|t| t.to_lowercase()));
+    }
+    if pattern_tokens
+        .iter()
+        .any(|token| core_tokens.iter().any(|core| core == token))
+    {
+        return true;
+    }
+    let closeness = 1.0 - (affinity - strength).abs();
+    closeness > 0.45
+}
+
+fn tokenize(input: &str) -> Vec<String> {
+    input
+        .split(|c| matches!(c, '/' | ':' | '.'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
 }
