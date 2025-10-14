@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use liminal_core::types::{Hint, Impulse as CoreImpulse, ImpulseKind, Metrics as CoreMetrics};
+use liminal_core::TrsConfig;
 use serde::{Deserialize, Serialize};
 use serde_cbor::Value;
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeConfig {
@@ -29,6 +31,22 @@ pub struct ProtocolImpulse {
     pub ttl_ms: u32,
     #[serde(rename = "tg", default)]
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "cmd")]
+pub enum ProtocolCommand {
+    #[serde(rename = "trs_set")]
+    TrsSet { cfg: TrsConfig },
+    #[serde(rename = "trs_target")]
+    TrsTarget { value: f32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ProtocolPush {
+    Impulse(ProtocolImpulse),
+    Command(ProtocolCommand),
 }
 
 impl ProtocolImpulse {
@@ -146,6 +164,13 @@ impl Outbox {
 
 pub fn event_from_field_log(log: &str, tick_ms: u32) -> Option<ProtocolEvent> {
     let trimmed = log.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(json) = serde_json::from_str::<JsonValue>(trimmed) {
+            if let Some(event) = event_from_json(&json, tick_ms) {
+                return Some(event);
+            }
+        }
+    }
     if let Some(rest) = trimmed.strip_prefix("DIVIDE parent=n") {
         let (parent_part, rest) = rest.split_once(" -> child=n")?;
         let parent_id: u64 = parent_part.parse().ok()?;
@@ -208,6 +233,72 @@ pub fn event_from_impulse_log(log: &str) -> Option<ProtocolEvent> {
         });
     }
     None
+}
+
+fn event_from_json(json: &JsonValue, tick_ms: u32) -> Option<ProtocolEvent> {
+    let ev = json.get("ev")?.as_str()?.to_string();
+    let id = if let Some(id_val) = json.get("id") {
+        json_value_to_event_id(id_val).unwrap_or(EventId::Text(ev.clone()))
+    } else {
+        EventId::Text(ev.clone())
+    };
+    let meta = match json.get("meta") {
+        Some(JsonValue::Object(map)) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), json_to_cbor(v)))
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    Some(ProtocolEvent {
+        ev,
+        id,
+        dt: tick_ms,
+        meta,
+    })
+}
+
+fn json_value_to_event_id(value: &JsonValue) -> Option<EventId> {
+    match value {
+        JsonValue::Number(num) => {
+            if let Some(u) = num.as_u64() {
+                Some(EventId::Num(u))
+            } else {
+                None
+            }
+        }
+        JsonValue::String(text) => Some(EventId::Text(text.clone())),
+        _ => None,
+    }
+}
+
+fn json_to_cbor(value: &JsonValue) -> Value {
+    match value {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(b) => Value::Bool(*b),
+        JsonValue::Number(num) => {
+            if let Some(i) = num.as_i64() {
+                Value::Integer(i as i128)
+            } else if let Some(u) = num.as_u64() {
+                Value::Integer(u as i128)
+            } else if let Some(f) = num.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Null
+            }
+        }
+        JsonValue::String(text) => Value::Text(text.clone()),
+        JsonValue::Array(items) => {
+            let converted = items.iter().map(json_to_cbor).collect();
+            Value::Array(converted)
+        }
+        JsonValue::Object(map) => {
+            let converted = map
+                .iter()
+                .map(|(k, v)| (Value::Text(k.clone()), json_to_cbor(v)))
+                .collect();
+            Value::Map(converted)
+        }
+    }
 }
 
 pub fn event_from_snapshot(id: u64) -> ProtocolEvent {

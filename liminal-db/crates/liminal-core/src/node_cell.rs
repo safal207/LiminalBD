@@ -82,21 +82,25 @@ impl NodeCell {
         Some(response)
     }
 
-    pub fn tick(&mut self, dt_ms: u64) {
+    pub fn tick(&mut self, dt_ms: u64, metabolism_scale: f32, sleep_shift: f32) {
         if self.state == NodeState::Dead {
             return;
         }
+        let target = self.seed.base_metabolism * metabolism_scale.clamp(0.5, 1.5);
+        self.metabolism = self.metabolism + (target - self.metabolism) * 0.05;
         let decay = self.metabolism * dt_ms as f32 * 0.0003;
         self.energy = (self.energy - decay).clamp(0.0, 1.0);
-        let target = self.seed.base_metabolism;
-        self.metabolism = self.metabolism + (target - self.metabolism) * 0.05;
-        if self.energy < 0.2 && self.state == NodeState::Active {
+        let shift = sleep_shift.clamp(-0.2, 0.2);
+        let idle_threshold = (0.2 - shift).clamp(0.05, 0.45);
+        if self.energy < idle_threshold && self.state == NodeState::Active {
             self.state = NodeState::Idle;
         }
-        if self.energy > 0.6 && self.state == NodeState::Idle {
+        let wake_threshold = (0.6 - shift).clamp(0.35, 0.95);
+        if self.energy > wake_threshold && self.state == NodeState::Idle {
             self.state = NodeState::Active;
         }
-        if self.state == NodeState::Sleep && self.energy > 0.5 {
+        let wake_sleep_threshold = (0.5 - shift).clamp(0.2, 0.85);
+        if self.state == NodeState::Sleep && self.energy > wake_sleep_threshold {
             self.state = NodeState::Idle;
         }
     }
@@ -125,12 +129,20 @@ impl NodeCell {
         Some(child)
     }
 
-    pub fn maybe_sleep_or_die(&mut self, now_ms: u64) -> bool {
+    pub fn drift_affinity(&mut self, drive: f32) {
+        let target = self.seed.affinity;
+        let t = (drive * 0.05).clamp(0.0, 0.25);
+        self.affinity = self.affinity + (target - self.affinity) * t;
+    }
+
+    pub fn maybe_sleep_or_die(&mut self, now_ms: u64, sleep_shift: f32) -> bool {
         if self.state == NodeState::Dead {
             return false;
         }
         let idle_for = now_ms.saturating_sub(self.last_response_ms);
-        if self.energy < 0.15 && idle_for > 3_000 {
+        let shift = sleep_shift.clamp(-0.2, 0.2);
+        let sleep_threshold = (0.15 - shift).clamp(0.01, 0.3);
+        if self.energy < sleep_threshold && idle_for > 3_000 {
             self.state = NodeState::Sleep;
         }
         if self.energy < 0.05 && idle_for > 6_000 {

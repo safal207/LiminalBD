@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::protocol::{
     adjust_tick, event_from_field_log, event_from_hint, event_from_impulse_log, event_from_metrics,
-    event_from_snapshot, BridgeConfig, Outbox, ProtocolImpulse, ProtocolMetrics,
+    event_from_snapshot, BridgeConfig, Outbox, ProtocolCommand, ProtocolMetrics, ProtocolPush,
 };
 
 struct BridgeState {
@@ -197,28 +197,61 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
         return 0;
     }
     let bytes = unsafe { slice::from_raw_parts(msg_cbor, len) };
-    let impulse: ProtocolImpulse = match serde_cbor::from_slice(bytes) {
-        Ok(imp) => imp,
+    let message: ProtocolPush = match serde_cbor::from_slice(bytes) {
+        Ok(msg) => msg,
         Err(_) => return 0,
     };
-    let core_impulse = impulse.to_core();
 
     let Some(state) = STATE.get() else {
         return 0;
     };
 
-    let logs = state.runtime.block_on({
-        let field = state.field.clone();
-        async move {
-            let mut guard = field.lock().await;
-            guard.route_impulse(core_impulse)
-        }
-    });
+    match message {
+        ProtocolPush::Impulse(impulse) => {
+            let core_impulse = impulse.to_core();
+            let logs = state.runtime.block_on({
+                let field = state.field.clone();
+                async move {
+                    let mut guard = field.lock().await;
+                    guard.route_impulse(core_impulse)
+                }
+            });
 
-    if let Ok(mut outbox) = state.outbox.lock() {
-        for log in logs {
-            if let Some(event) = event_from_impulse_log(&log) {
-                outbox.push_event(event);
+            if let Ok(mut outbox) = state.outbox.lock() {
+                for log in logs {
+                    if let Some(event) = event_from_impulse_log(&log) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
+        }
+        ProtocolPush::Command(command) => {
+            let (event_string, dt) = match command {
+                ProtocolCommand::TrsSet { cfg } => {
+                    let event = state.runtime.block_on({
+                        let field = state.field.clone();
+                        async move {
+                            let mut guard = field.lock().await;
+                            guard.set_trs_config(cfg)
+                        }
+                    });
+                    (event, 1_000u32)
+                }
+                ProtocolCommand::TrsTarget { value } => {
+                    let event = state.runtime.block_on({
+                        let field = state.field.clone();
+                        async move {
+                            let mut guard = field.lock().await;
+                            guard.set_trs_target(value)
+                        }
+                    });
+                    (event, 1_000u32)
+                }
+            };
+            if let Ok(mut outbox) = state.outbox.lock() {
+                if let Some(event) = event_from_field_log(&event_string, dt) {
+                    outbox.push_event(event);
+                }
             }
         }
     }
@@ -266,7 +299,7 @@ pub extern "C" fn liminal_pull(out: *mut u8, cap: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{BridgeConfig, ProtocolPackage};
+    use crate::protocol::{BridgeConfig, ProtocolImpulse, ProtocolPackage};
 
     #[test]
     fn ffi_flow() {

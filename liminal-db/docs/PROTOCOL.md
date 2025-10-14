@@ -29,7 +29,7 @@
 
 ```
 {
-  "ev": "divide" | "sleep" | "dead" | "metrics" | "hint",
+  "ev": "divide" | "sleep" | "dead" | "metrics" | "hint" | "trs_trace" | "harmony",
   "id": <u64 | text>,  // идентификатор сущности или произвольный тег
   "dt": <u32>,         // дельта времени тикера (мс)
   "meta": { ... }      // дополнительные поля, зависят от события
@@ -41,6 +41,8 @@
 * `dead`:   `meta = { "state": "dead" }`.
 * `metrics`: `meta = { "cells": u32, "sleeping": f32, "avgMet": f32, "avgLat": u32 }`.
 * `hint`:   `meta = { "hint": "slow_tick" | "fast_tick" | "trim_field" | "wake_seeds", "tick_ms": u32, ... }`. Дополнительные поля могут появляться в будущем.
+* `trs_trace`: `meta = { "alpha": f32, "err": f32, "observed": f32, "tick_adj": i32 }`.
+* `harmony`: `meta = { "alpha": f32, "aff_scale": f32, "met_scale": f32, "sleep_delta": f32 }`.
 
 ### Metrics
 
@@ -73,6 +75,9 @@ a <pattern> [strength]  # создать Affect-импульс
 :reflex add <json>      # добавить правило рефлекса
 :reflex list            # вывести список правил
 :reflex rm <id>         # удалить правило по идентификатору
+:trs show               # показать состояние TRS/Harmony Loop
+:trs set <json>         # установить коэффициенты TRS
+:trs target <value>     # обновить целевую "живость" (0.3..0.8)
 ```
 
 ### Правила рефлексов
@@ -101,6 +106,23 @@ CLI принимает JSON-описание правил через коман�
 ```
 :reflex add {"token":"cpu/load","kind":"Affect","min_strength":0.7,"window_ms":1000,"min_count":5,"then":{"BoostLinks":{"factor":1.2,"top":8}}}
 :reflex add {"token":"mem/free","kind":"Query","min_strength":0.5,"window_ms":1500,"min_count":3,"then":{"WakeSleeping":{"count":2}}}
+```
+
+### Harmony Loop / TRS
+
+TRS управляет плавностью цикла. Команды CLI:
+
+```
+:trs show
+:trs set {"alpha":0.25,"beta":0.6,"k_p":0.8,"k_i":0.15,"k_d":0.05,"target_load":0.6}
+:trs target 0.62
+```
+
+В `--pipe-cbor` режиме соответствующие команды передаются как объекты CBOR:
+
+```
+{"cmd":"trs_set","cfg":{"alpha":0.25,"beta":0.6,"k_p":0.8,"k_i":0.15,"k_d":0.05,"target_load":0.6}}
+{"cmd":"trs_target","value":0.62}
 ```
 
 ## Режим `--pipe-cbor`
