@@ -361,6 +361,8 @@ mod tests {
             store_path: None,
             snap_interval: None,
             snap_maxwal: None,
+            ws_port: None,
+            ws_format: None,
         };
         let cfg_bytes = serde_cbor::to_vec(&cfg).unwrap();
         assert!(liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()));

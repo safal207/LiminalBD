@@ -8,6 +8,14 @@ use hex::encode as encode_hex;
 use hex::FromHex;
 use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
 use liminal_bridge_abi::protocol::BridgeConfig;
+use liminal_bridge_net::stream_codec::StreamFormat;
+use liminal_bridge_net::ws_client::{connect_ws, WsHandle};
+use liminal_bridge_net::{
+    format_clients as ws_format_clients, list_clients as ws_list_clients,
+    publish_event as ws_publish_event, publish_metrics as ws_publish_metrics,
+    set_default_format as ws_set_default_format, take_command_receiver as ws_take_command_receiver,
+    ws_server, IncomingCommand,
+};
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
@@ -21,14 +29,19 @@ use serde_json::{json, Value as JsonValue};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
     let mut args = std::env::args().skip(1);
     let mut pipe_cbor = false;
     let mut store_path: Option<PathBuf> = None;
     let mut snap_interval_secs: u64 = 60;
     let mut snap_maxwal: u64 = 5_000;
+    let mut ws_port: u16 = 8787;
+    let mut ws_format = StreamFormat::Json;
+    let mut nexus_client: Option<String> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pipe-cbor" => pipe_cbor = true,
@@ -60,6 +73,30 @@ async fn main() -> Result<()> {
                     return Err(anyhow!("--snap-maxwal must be greater than zero"));
                 }
             }
+            "--ws-port" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--ws-port requires a port"));
+                };
+                ws_port = value
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("--ws-port expects a valid port, got {value}"))?;
+            }
+            "--ws-format" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--ws-format requires a value"));
+                };
+                ws_format = match value.to_lowercase().as_str() {
+                    "json" => StreamFormat::Json,
+                    "cbor" => StreamFormat::Cbor,
+                    other => return Err(anyhow!("unsupported ws format: {other}")),
+                };
+            }
+            "--nexus-client" => {
+                let Some(url) = args.next() else {
+                    return Err(anyhow!("--nexus-client requires a url"));
+                };
+                nexus_client = Some(url);
+            }
             other => return Err(anyhow!("unknown argument: {other}")),
         }
     }
@@ -70,10 +107,16 @@ async fn main() -> Result<()> {
         max_wal_events: snap_maxwal,
     });
 
+    let ws_runtime = WsRuntimeConfig {
+        port: ws_port,
+        format: ws_format,
+        nexus_client,
+    };
+
     if pipe_cbor {
         run_pipe_cbor(store_config).await
     } else {
-        run_interactive(store_config).await
+        run_interactive(store_config, ws_runtime).await
     }
 }
 
@@ -84,7 +127,14 @@ struct StoreRuntimeConfig {
     max_wal_events: u64,
 }
 
-async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
+#[derive(Clone)]
+struct WsRuntimeConfig {
+    port: u16,
+    format: StreamFormat,
+    nexus_client: Option<String>,
+}
+
+async fn run_interactive(store: Option<StoreRuntimeConfig>, ws: WsRuntimeConfig) -> Result<()> {
     let (field, journal, store_cfg) = if let Some(cfg) = store.clone() {
         let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
         let (mut field, replay_offset) =
@@ -114,6 +164,47 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<Impulse>(128);
 
     tokio::spawn(start_host_sensors(tx.clone()));
+
+    ws_set_default_format(ws.format);
+
+    if ws.nexus_client.is_none() {
+        let listen_addr = format!("127.0.0.1:{}", ws.port);
+        let field_for_ws = field.clone();
+        let log_addr = listen_addr.clone();
+        tokio::spawn(async move {
+            if let Err(err) = ws_server::start_ws_server(field_for_ws, &listen_addr).await {
+                eprintln!("websocket server error: {err}");
+            }
+        });
+        info!(addr = %log_addr, "ws.local_listening");
+    }
+
+    let remote_ws: StdArc<Mutex<Option<WsHandle>>> = StdArc::new(Mutex::new(None));
+    if let Some(url) = ws.nexus_client.clone() {
+        let holder = remote_ws.clone();
+        tokio::spawn(async move {
+            match connect_ws(&url).await {
+                Ok(handle) => {
+                    info!(url = %url, "ws.remote_connected");
+                    {
+                        let mut guard = holder.lock().await;
+                        *guard = Some(handle.clone());
+                    }
+                    tokio::spawn(async move {
+                        loop {
+                            match handle.recv().await {
+                                Some(value) => ws_publish_event(value),
+                                None => break,
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    eprintln!("failed to connect to nexus client {url}: {err}");
+                }
+            }
+        });
+    }
 
     if let (Some(journal_arc), Some(cfg)) = (journal.clone(), store_cfg.clone()) {
         let field_for_snap = field.clone();
@@ -178,9 +269,15 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                     metrics.live_load,
                     hints
                 );
+                if let Ok(metrics_json) = serde_json::to_value(metrics) {
+                    ws_publish_metrics(json!({"ev": "metrics", "metrics": metrics_json}));
+                }
             },
             move |event| {
                 print_event_line(event);
+                if let Ok(value) = serde_json::from_str::<JsonValue>(event) {
+                    ws_publish_event(value);
+                }
             },
             move |hint| {
                 let mut store = hint_buffer.lock().unwrap();
@@ -190,9 +287,24 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
         .await;
     });
 
+    if let Some(mut cmd_rx) = ws_take_command_receiver() {
+        let field_for_cmds = field.clone();
+        let tx_for_cmds = tx.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if let Err(err) =
+                    handle_network_command(cmd.clone(), &field_for_cmds, &tx_for_cmds).await
+                {
+                    eprintln!("ws command failed: {err}");
+                }
+            }
+        });
+    }
+
     let tx_cli = tx.clone();
     let journal_for_cli = journal.clone();
     let field_for_cli = field.clone();
+    let remote_for_cli = remote_ws.clone();
     let input_task = tokio::spawn(async move {
         let stdin = BufReader::new(tokio::io::stdin());
         let mut lines = stdin.lines();
@@ -247,6 +359,16 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                             &field_for_cli,
                         )
                         .await;
+                    }
+                    command if command.starts_with("ws") => {
+                        if let Err(err) = handle_ws_command(
+                            command.trim_start_matches("ws").trim(),
+                            &remote_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("ws command failed: {err}");
+                        }
                     }
                     command if command.starts_with("trs") => {
                         if let Err(err) = handle_trs_command(
@@ -327,6 +449,8 @@ async fn run_pipe_cbor(store: Option<StoreRuntimeConfig>) -> Result<()> {
         snap_maxwal: store
             .as_ref()
             .map(|cfg| cfg.max_wal_events.min(u32::MAX as u64) as u32),
+        ws_port: None,
+        ws_format: None,
     };
     let cfg_bytes = serde_cbor::to_vec(&config)?;
     if !liminal_init(cfg_bytes.as_ptr(), cfg_bytes.len()) {
@@ -611,9 +735,132 @@ struct ReflexAddRequest {
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
-
 fn default_enabled() -> bool {
     true
+}
+
+async fn handle_network_command(
+    command: IncomingCommand,
+    field: &StdArc<Mutex<ClusterField>>,
+    impulse_tx: &mpsc::Sender<Impulse>,
+) -> Result<()> {
+    match command {
+        IncomingCommand::Impulse { data } => {
+            let impulse = parse_impulse_json(&data)?;
+            impulse_tx
+                .send(impulse)
+                .await
+                .map_err(|_| anyhow!("impulse channel closed"))?;
+        }
+        IncomingCommand::Lql { query } => {
+            let ast = parse_lql(&query)?;
+            let outcome = {
+                let mut guard = field.lock().await;
+                guard.exec_lql(ast)
+            }?;
+            if let Some(response) = outcome.response {
+                print_lql_response(&response);
+            }
+            for event in outcome.events {
+                print_event_line(&event);
+                if let Ok(value) = serde_json::from_str::<JsonValue>(&event) {
+                    ws_publish_event(value);
+                }
+            }
+        }
+        IncomingCommand::PolicySet { data } => {
+            println!("POLICY_SET {:?}", data);
+        }
+        IncomingCommand::Subscribe { .. } => {}
+        IncomingCommand::Raw(value) => {
+            println!("WS RAW {}", value);
+        }
+    }
+    Ok(())
+}
+
+async fn handle_ws_command(command: &str, remote: &StdArc<Mutex<Option<WsHandle>>>) -> Result<()> {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            println!("WS commands: info | send <json> | broadcast <json>");
+        }
+        "info" => {
+            let clients = ws_list_clients();
+            if clients.is_empty() {
+                println!("WS no clients connected");
+            } else {
+                for line in ws_format_clients(&clients) {
+                    println!("WS {}", line);
+                }
+            }
+            if remote.lock().await.is_some() {
+                println!("WS nexus-client connected");
+            }
+        }
+        "send" => {
+            let payload = parts.next().unwrap_or("").trim();
+            if payload.is_empty() {
+                return Err(anyhow!("usage: :ws send <json>"));
+            }
+            let value: JsonValue = serde_json::from_str(payload)?;
+            let handle = {
+                let guard = remote.lock().await;
+                guard.clone()
+            };
+            let Some(client) = handle else {
+                return Err(anyhow!("no nexus client connection"));
+            };
+            client.send(value).await?;
+            println!("WS send queued");
+        }
+        "broadcast" => {
+            let payload = parts.next().unwrap_or("").trim();
+            if payload.is_empty() {
+                return Err(anyhow!("usage: :ws broadcast <json>"));
+            }
+            let value: JsonValue = serde_json::from_str(payload)?;
+            ws_publish_event(value);
+            println!("WS broadcast queued");
+        }
+        other => {
+            return Err(anyhow!("unknown ws subcommand: {}", other));
+        }
+    }
+    Ok(())
+}
+
+fn parse_impulse_json(data: &JsonValue) -> Result<Impulse> {
+    let pattern = data
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("impulse requires pattern"))?;
+    let strength = data.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.6) as f32;
+    let ttl_ms = data.get("ttl_ms").and_then(|v| v.as_u64()).unwrap_or(1_500);
+    let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("query");
+    let impulse_kind = match kind.to_lowercase().as_str() {
+        "affect" | "a" => ImpulseKind::Affect,
+        "write" | "w" => ImpulseKind::Write,
+        _ => ImpulseKind::Query,
+    };
+    let tags = data
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["ws".into()]);
+    Ok(Impulse {
+        kind: impulse_kind,
+        pattern: pattern.to_string(),
+        strength,
+        ttl_ms,
+        tags,
+    })
 }
 
 fn print_event_line(raw: &str) {
