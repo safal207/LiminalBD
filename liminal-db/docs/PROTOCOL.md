@@ -80,6 +80,53 @@ a <pattern> [strength]  # создать Affect-импульс
 :trs target <value>     # обновить целевую "живость" (0.3..0.8)
 ```
 
+### LQL и Views
+
+В версии v0.6 добавлен лёгкий язык запросов LQL. Команды вводятся через `lql ...`:
+
+```
+SELECT <pattern> [WHERE strength>=<f32>] [WINDOW <ms>]
+SUBSCRIBE <pattern> [WINDOW <ms>] [EVERY <ms>]
+UNSUBSCRIBE <view_id>
+```
+
+* `SELECT` возвращает сводку по совпадениям шаблона за окно: `count`, `avg_strength`, `avg_latency`, `top_nodes` (до трёх узлов).
+* `SUBSCRIBE` регистрирует живое представление (View). Каждые `EVERY` миллисекунд оно публикует событие `view` с такой же сводкой.
+* `UNSUBSCRIBE` отменяет подписку по идентификатору.
+
+Примеры CLI:
+
+```
+lql SELECT cpu/load WINDOW 1000
+lql SUBSCRIBE temp/device WINDOW 3000 EVERY 1000
+```
+
+В `--pipe-cbor` режиме запросы передаются как команды:
+
+```
+{"cmd":"lql","q":"SELECT cpu/load WHERE strength>=0.7 WINDOW 1000"}
+```
+
+События ядра:
+
+```
+{"ev":"lql","meta":{"select":{...}}}
+{"ev":"lql","meta":{"subscribe":{...}}}
+{"ev":"lql","meta":{"unsubscribe":{...}}}
+{"ev":"view","meta":{"id":<u64>,"pattern":<text>,"window":<u32>,"every":<u32>,"stats":{...}}}
+```
+
+`stats` содержит:
+
+```
+{
+  "count": <u32>,
+  "avg_strength": <f32>,
+  "avg_latency": <f32>,
+  "top_nodes": [ {"id": <u64>, "hits": <u32>}, ... ]
+}
+```
+
 ### Правила рефлексов
 
 CLI принимает JSON-описание правил через команду `:reflex add`. Поля структуры:

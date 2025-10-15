@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use liminal_core::life_loop::run_loop;
+use liminal_core::parse_lql;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
 use liminal_store::{decode_delta, DiskJournal, Offset};
+use serde_json::json;
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 
@@ -225,35 +227,86 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
                 }
             }
         }
-        ProtocolPush::Command(command) => {
-            let (event_string, dt) = match command {
-                ProtocolCommand::TrsSet { cfg } => {
-                    let event = state.runtime.block_on({
-                        let field = state.field.clone();
-                        async move {
-                            let mut guard = field.lock().await;
-                            guard.set_trs_config(cfg)
-                        }
-                    });
-                    (event, 1_000u32)
-                }
-                ProtocolCommand::TrsTarget { value } => {
-                    let event = state.runtime.block_on({
-                        let field = state.field.clone();
-                        async move {
-                            let mut guard = field.lock().await;
-                            guard.set_trs_target(value)
-                        }
-                    });
-                    (event, 1_000u32)
-                }
-            };
-            if let Ok(mut outbox) = state.outbox.lock() {
-                if let Some(event) = event_from_field_log(&event_string, dt) {
-                    outbox.push_event(event);
+        ProtocolPush::Command(command) => match command {
+            ProtocolCommand::TrsSet { cfg } => {
+                let event_string = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        guard.set_trs_config(cfg)
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    if let Some(event) = event_from_field_log(&event_string, 1_000) {
+                        outbox.push_event(event);
+                    }
                 }
             }
-        }
+            ProtocolCommand::TrsTarget { value } => {
+                let event_string = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        guard.set_trs_target(value)
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    if let Some(event) = event_from_field_log(&event_string, 1_000) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
+            ProtocolCommand::Lql { query } => {
+                let mut events: Vec<String> = Vec::new();
+                match parse_lql(&query) {
+                    Ok(ast) => {
+                        let outcome = state.runtime.block_on({
+                            let field = state.field.clone();
+                            async move {
+                                let mut guard = field.lock().await;
+                                guard.exec_lql(ast)
+                            }
+                        });
+                        match outcome {
+                            Ok(result) => {
+                                events.extend(result.events);
+                            }
+                            Err(err) => {
+                                events.push(
+                                    json!({
+                                        "ev": "lql",
+                                        "meta": {
+                                            "error": err.to_string(),
+                                            "query": query,
+                                        }
+                                    })
+                                    .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        events.push(
+                            json!({
+                                "ev": "lql",
+                                "meta": {
+                                    "error": err.to_string(),
+                                    "query": query,
+                                }
+                            })
+                            .to_string(),
+                        );
+                    }
+                }
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    for event_string in events {
+                        if let Some(event) = event_from_field_log(&event_string, 1_000) {
+                            outbox.push_event(event);
+                        }
+                    }
+                }
+            }
+        },
     }
 
     len

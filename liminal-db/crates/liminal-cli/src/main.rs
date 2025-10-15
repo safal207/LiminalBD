@@ -10,11 +10,14 @@ use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
 use liminal_bridge_abi::protocol::BridgeConfig;
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
-use liminal_core::{ClusterField, ReflexAction, ReflexRule, ReflexWhen, TrsConfig};
+use liminal_core::{
+    parse_lql, ClusterField, LqlResponse, ReflexAction, ReflexRule, ReflexWhen, TrsConfig,
+    ViewStats,
+};
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
@@ -177,7 +180,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                 );
             },
             move |event| {
-                println!("{}", event);
+                print_event_line(event);
             },
             move |hint| {
                 let mut store = hint_buffer.lock().unwrap();
@@ -260,6 +263,40 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                     }
                 }
                 continue;
+            }
+            if trimmed.eq_ignore_ascii_case("lql") {
+                eprintln!("usage: lql <SELECT|SUBSCRIBE|UNSUBSCRIBE ...>");
+                continue;
+            }
+            if let Some((prefix, rest)) = trimmed.split_once(' ') {
+                if prefix.eq_ignore_ascii_case("lql") {
+                    let query = rest.trim();
+                    if query.is_empty() {
+                        eprintln!("usage: lql <SELECT|SUBSCRIBE|UNSUBSCRIBE ...>");
+                    } else {
+                        match parse_lql(query) {
+                            Ok(ast) => {
+                                let outcome = {
+                                    let mut guard = field_for_cli.lock().await;
+                                    guard.exec_lql(ast)
+                                };
+                                match outcome {
+                                    Ok(result) => {
+                                        if let Some(response) = result.response {
+                                            print_lql_response(&response);
+                                        }
+                                        for event in result.events {
+                                            print_event_line(&event);
+                                        }
+                                    }
+                                    Err(err) => eprintln!("LQL execution failed: {}", err),
+                                }
+                            }
+                            Err(err) => eprintln!("LQL parse error: {}", err),
+                        }
+                    }
+                    continue;
+                }
             }
             match parse_command(trimmed) {
                 Some(impulse) => {
@@ -577,6 +614,154 @@ struct ReflexAddRequest {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn print_event_line(raw: &str) {
+    if let Ok(value) = serde_json::from_str::<JsonValue>(raw) {
+        if let Some(event) = value.get("ev").and_then(|ev| ev.as_str()) {
+            if let Some(line) = match event {
+                "view" => format_view_event(&value),
+                "lql" => format_lql_event(&value),
+                _ => None,
+            } {
+                println!("{}", line);
+                return;
+            }
+        }
+    }
+    println!("{}", raw);
+}
+
+fn format_view_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let id = meta.get("id")?.as_u64()?;
+    let pattern = meta.get("pattern")?.as_str().unwrap_or("");
+    let window = meta.get("window")?.as_u64().unwrap_or_default();
+    let stats = meta.get("stats")?;
+    let (count, avg_strength, avg_latency, top_nodes) = extract_stats_from_json(stats)?;
+    Some(format!(
+        "VIEW id={} pattern={} window={}ms count={} avg_str={:.2} avg_lat={:.1} top=[{}]",
+        id, pattern, window, count, avg_strength, avg_latency, top_nodes
+    ))
+}
+
+fn format_lql_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    if let Some(select) = meta.get("select") {
+        let pattern = select.get("pattern")?.as_str().unwrap_or("");
+        let window = select.get("window_ms")?.as_u64().unwrap_or_default();
+        let min_strength = select
+            .get("min_strength")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "-".into());
+        let stats = select.get("stats")?;
+        let (count, avg_strength, avg_latency, top_nodes) = extract_stats_from_json(stats)?;
+        return Some(format!(
+            "LQL SELECT pattern={} window={}ms min>={} count={} avg_str={:.2} avg_lat={:.1} top=[{}]",
+            pattern, window, min_strength, count, avg_strength, avg_latency, top_nodes
+        ));
+    }
+    if let Some(subscribe) = meta.get("subscribe") {
+        let id = subscribe.get("id")?.as_u64()?;
+        let pattern = subscribe.get("pattern")?.as_str().unwrap_or("");
+        let window = subscribe.get("window_ms")?.as_u64().unwrap_or_default();
+        let every = subscribe.get("every_ms")?.as_u64().unwrap_or_default();
+        return Some(format!(
+            "LQL SUBSCRIBE id={} pattern={} window={}ms every={}ms",
+            id, pattern, window, every
+        ));
+    }
+    if let Some(unsubscribe) = meta.get("unsubscribe") {
+        let id = unsubscribe.get("id")?.as_u64()?;
+        let removed = unsubscribe.get("removed")?.as_bool().unwrap_or(false);
+        return Some(format!("LQL UNSUBSCRIBE id={} removed={}", id, removed));
+    }
+    if let Some(err) = meta.get("error") {
+        let query = meta.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        return Some(format!(
+            "LQL ERROR query='{}' message={}",
+            query,
+            err.as_str().unwrap_or("unknown")
+        ));
+    }
+    None
+}
+
+fn extract_stats_from_json(stats: &JsonValue) -> Option<(u32, f64, f64, String)> {
+    let count = stats.get("count")?.as_u64()? as u32;
+    let avg_strength = stats.get("avg_strength")?.as_f64()?;
+    let avg_latency = stats.get("avg_latency")?.as_f64()?;
+    let top_nodes = stats
+        .get("top_nodes")
+        .and_then(|array| array.as_array())
+        .map(|items| format_top_nodes_json(items))
+        .unwrap_or_else(|| "-".into());
+    Some((count, avg_strength, avg_latency, top_nodes))
+}
+
+fn format_top_nodes_json(items: &[JsonValue]) -> String {
+    if items.is_empty() {
+        return "-".into();
+    }
+    let parts: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_u64()?;
+            let hits = item.get("hits")?.as_u64()?;
+            Some(format!("n{}:{}", id, hits))
+        })
+        .collect();
+    if parts.is_empty() {
+        "-".into()
+    } else {
+        parts.join(",")
+    }
+}
+
+fn print_lql_response(response: &LqlResponse) {
+    match response {
+        LqlResponse::Select(result) => {
+            let (count, avg_strength, avg_latency, top) = format_stats_output(&result.stats);
+            let threshold = result
+                .min_strength
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "LQL SELECT pattern={} window={}ms min>={} count={} avg_str={:.2} avg_lat={:.1} top=[{}]",
+                result.pattern, result.window_ms, threshold, count, avg_strength, avg_latency, top
+            );
+        }
+        LqlResponse::Subscribe(result) => {
+            println!(
+                "LQL SUBSCRIBE id={} pattern={} window={}ms every={}ms",
+                result.id, result.pattern, result.window_ms, result.every_ms
+            );
+        }
+        LqlResponse::Unsubscribe(result) => {
+            println!(
+                "LQL UNSUBSCRIBE id={} removed={}",
+                result.id, result.removed
+            );
+        }
+    }
+}
+
+fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, String) {
+    let count = stats.count;
+    let avg_strength = stats.avg_strength as f64;
+    let avg_latency = stats.avg_latency as f64;
+    let top = if stats.top_nodes.is_empty() {
+        "-".into()
+    } else {
+        stats
+            .top_nodes
+            .iter()
+            .map(|node| format!("n{}:{}", node.id, node.hits))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    (count, avg_strength, avg_latency, top)
 }
 
 fn parse_command(line: &str) -> Option<Impulse> {

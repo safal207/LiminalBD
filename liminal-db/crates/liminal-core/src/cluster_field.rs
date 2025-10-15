@@ -9,11 +9,16 @@ use crate::journal::{
     AffinityDelta, CellSnapshot, DivideDelta, EnergyDelta, EventDelta, Journal, LinkDelta,
     StateDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
+use crate::lql::{
+    LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
+    LqlUnsubscribeResult,
+};
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule};
 use crate::seed::{create_seed, SeedParams};
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
+use crate::views::{NodeHitStat, ViewRegistry, ViewStats};
 
 pub type FieldEvents = Vec<String>;
 
@@ -25,6 +30,7 @@ pub struct ClusterField {
     pub rules: HashMap<ReflexId, ReflexRule>,
     pub next_reflex_id: ReflexId,
     pub counters: HashMap<(String, ImpulseKind), VecDeque<(u64, f32)>>,
+    token_hits: HashMap<String, VecDeque<Hit>>,
     journal: Option<Arc<dyn Journal + Send + Sync>>,
     ticks_since_impulse: u64,
     link_usage: HashMap<(NodeId, NodeId), LinkStat>,
@@ -35,7 +41,24 @@ pub struct ClusterField {
     last_dream_ms: u64,
     pub trs: TrsState,
     harmony: HarmonyTuning,
+    pub views: ViewRegistry,
+    next_hit_seq: u64,
+    view_tick_accum: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct Hit {
+    pub seq: u64,
+    pub ts: u64,
+    pub node: NodeId,
+    pub strength: f32,
+    pub latency_ms: u32,
+}
+
+const MAX_TOKEN_HITS: usize = 512;
+const HIT_RETENTION_MS: u64 = 120_000;
+const DEFAULT_WINDOW_MS: u32 = 1_000;
+const DEFAULT_VIEW_EVERY_MS: u32 = 1_000;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarmonyTuning {
@@ -66,6 +89,7 @@ impl ClusterField {
             rules: HashMap::new(),
             next_reflex_id: 1,
             counters: HashMap::new(),
+            token_hits: HashMap::new(),
             journal: None,
             ticks_since_impulse: 0,
             link_usage: HashMap::new(),
@@ -76,6 +100,9 @@ impl ClusterField {
             recent_routes: HashMap::new(),
             trs: TrsState::default(),
             harmony: HarmonyTuning::default(),
+            views: ViewRegistry::new(),
+            next_hit_seq: 1,
+            view_tick_accum: 0,
         }
     }
 
@@ -90,6 +117,179 @@ impl ClusterField {
 
     pub fn clear_journal(&mut self) {
         self.journal = None;
+    }
+
+    fn record_token_hit(&mut self, token: &str, node: NodeId, strength: f32, latency_ms: u32) {
+        let normalized = token.to_lowercase();
+        let seq = self.next_hit_seq;
+        self.next_hit_seq = self.next_hit_seq.saturating_add(1);
+        let entry = self
+            .token_hits
+            .entry(normalized)
+            .or_insert_with(VecDeque::new);
+        entry.push_back(Hit {
+            seq,
+            ts: self.now_ms,
+            node,
+            strength,
+            latency_ms,
+        });
+        while let Some(front) = entry.front() {
+            if self.now_ms.saturating_sub(front.ts) > HIT_RETENTION_MS {
+                entry.pop_front();
+            } else {
+                break;
+            }
+        }
+        while entry.len() > MAX_TOKEN_HITS {
+            entry.pop_front();
+        }
+    }
+
+    pub fn recent_for(&self, token: &str, window_ms: u32) -> Vec<Hit> {
+        let normalized = token.to_lowercase();
+        let Some(queue) = self.token_hits.get(&normalized) else {
+            return Vec::new();
+        };
+        let cutoff = self.now_ms.saturating_sub(window_ms as u64);
+        let mut hits: Vec<Hit> = queue
+            .iter()
+            .rev()
+            .take_while(|hit| hit.ts >= cutoff)
+            .cloned()
+            .collect();
+        hits.reverse();
+        hits
+    }
+
+    fn gather_hits_for_pattern(&self, pattern: &str, window_ms: u32) -> Vec<Hit> {
+        let tokens = tokenize(pattern);
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let mut combined: Vec<Hit> = Vec::new();
+        let mut seen: HashSet<u64> = HashSet::new();
+        for token in tokens {
+            for hit in self.recent_for(&token, window_ms) {
+                if seen.insert(hit.seq) {
+                    combined.push(hit);
+                }
+            }
+        }
+        combined.sort_by_key(|hit| hit.ts);
+        combined
+    }
+
+    fn stats_from_hits(&self, hits: &[Hit]) -> ViewStats {
+        if hits.is_empty() {
+            return ViewStats::default();
+        }
+        let count = hits.len() as u32;
+        let total_strength: f32 = hits.iter().map(|hit| hit.strength).sum();
+        let total_latency: f32 = hits.iter().map(|hit| hit.latency_ms as f32).sum();
+        let mut node_counts: HashMap<NodeId, u32> = HashMap::new();
+        for hit in hits {
+            *node_counts.entry(hit.node).or_insert(0) += 1;
+        }
+        let mut top_nodes: Vec<NodeHitStat> = node_counts
+            .into_iter()
+            .map(|(id, hits)| NodeHitStat { id, hits })
+            .collect();
+        top_nodes.sort_by(|a, b| b.hits.cmp(&a.hits).then_with(|| a.id.cmp(&b.id)));
+        top_nodes.truncate(3);
+        ViewStats {
+            count,
+            avg_strength: (total_strength / count as f32).clamp(0.0, 1.0),
+            avg_latency: total_latency / count as f32,
+            top_nodes,
+        }
+    }
+
+    pub fn stats_for_pattern(
+        &self,
+        pattern: &str,
+        window_ms: u32,
+        min_strength: Option<f32>,
+    ) -> ViewStats {
+        let window = window_ms.max(1);
+        let mut hits = self.gather_hits_for_pattern(pattern, window);
+        if let Some(min_strength) = min_strength {
+            hits.retain(|hit| hit.strength >= min_strength);
+        }
+        self.stats_from_hits(&hits)
+    }
+
+    pub fn exec_lql(&mut self, ast: LqlAst) -> LqlResult {
+        match ast {
+            LqlAst::Select {
+                pattern,
+                min_strength,
+                window_ms,
+            } => {
+                let window = window_ms.unwrap_or(DEFAULT_WINDOW_MS).max(1);
+                let stats = self.stats_for_pattern(&pattern, window, min_strength);
+                let payload = LqlSelectResult {
+                    pattern: pattern.clone(),
+                    window_ms: window,
+                    min_strength,
+                    stats: stats.clone(),
+                };
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "select": payload,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Select(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Subscribe {
+                pattern,
+                window_ms,
+                every_ms,
+            } => {
+                let window = window_ms.unwrap_or(DEFAULT_WINDOW_MS).max(1);
+                let every = every_ms.unwrap_or(DEFAULT_VIEW_EVERY_MS).max(200);
+                let id = self
+                    .views
+                    .add_view(pattern.clone(), window, every, self.now_ms);
+                let payload = LqlSubscribeResult {
+                    id,
+                    pattern: pattern.clone(),
+                    window_ms: window,
+                    every_ms: every,
+                };
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "subscribe": payload,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Subscribe(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Unsubscribe { id } => {
+                let removed = self.views.remove_view(id);
+                let payload = LqlUnsubscribeResult { id, removed };
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "unsubscribe": payload,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Unsubscribe(payload)),
+                    events: vec![event],
+                })
+            }
+        }
     }
 
     pub fn rebuild_caches(&mut self) {
@@ -754,9 +954,10 @@ impl ClusterField {
             })
             .collect();
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut responded: Vec<NodeId> = Vec::new();
+        let mut responded: Vec<(NodeId, u32)> = Vec::new();
         for (_score, id) in scored.into_iter().take(3) {
             if let Some(cell) = self.cells.get_mut(&id) {
+                let previous = cell.last_response_ms;
                 if let Some(log) = cell.ingest(&imp) {
                     cell.last_response_ms = self.now_ms;
                     let delta = EventDelta::Energy(EnergyDelta {
@@ -768,18 +969,27 @@ impl ClusterField {
                     });
                     logs.push(log);
                     self.emit(delta);
-                    responded.push(id);
+                    let latency = self.now_ms.saturating_sub(previous).min(u32::MAX as u64) as u32;
+                    responded.push((id, latency));
                 }
             }
         }
-        self.record_route_sequence(&responded);
-        for token in seen_tokens {
-            let history = self.recent_routes.entry(token).or_default();
-            for &id in &responded {
-                history.push_back(id);
+        let responded_nodes: Vec<NodeId> = responded.iter().map(|(id, _)| *id).collect();
+        self.record_route_sequence(&responded_nodes);
+        for token in seen_tokens.iter() {
+            let history = self.recent_routes.entry(token.clone()).or_default();
+            for id in &responded_nodes {
+                history.push_back(*id);
             }
             while history.len() > 64 {
                 history.pop_front();
+            }
+        }
+        if !responded.is_empty() {
+            for token in seen_tokens.iter() {
+                for (node, latency) in &responded {
+                    self.record_token_hit(token, *node, imp.strength, *latency);
+                }
             }
         }
         self.ticks_since_impulse = 0;
@@ -905,6 +1115,15 @@ impl ClusterField {
         self.evaluate_dream_state(dt_ms, sleeping_cells, total_cells, &mut events);
         for event in pending_events {
             self.emit(event);
+        }
+        self.view_tick_accum = self.view_tick_accum.saturating_add(dt_ms);
+        while self.view_tick_accum >= 500 {
+            self.view_tick_accum -= 500;
+            let due = self.views.take_due(self.now_ms);
+            for view in due {
+                let stats = self.stats_for_pattern(&view.pattern, view.window_ms, None);
+                events.push(ViewRegistry::build_event(&view, &stats));
+            }
         }
         events
     }
@@ -1282,6 +1501,77 @@ mod tests {
                     .ok()
             })
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn recent_for_respects_window() {
+        let mut field = ClusterField::new();
+        field.now_ms = 100;
+        field.record_token_hit("cpu", 1, 0.8, 120);
+        field.now_ms = 600;
+        field.record_token_hit("cpu", 2, 0.6, 80);
+        field.now_ms = 1_200;
+        let hits = field.recent_for("cpu", 700);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node, 2);
+        assert_eq!(hits[0].latency_ms, 80);
+    }
+
+    #[test]
+    fn lql_select_subscribe_flow() {
+        let mut field = ClusterField::new();
+        field.now_ms = 100;
+        field.record_token_hit("cpu", 1, 0.9, 110);
+        field.now_ms = 400;
+        field.record_token_hit("load", 2, 0.7, 90);
+        let select = field
+            .exec_lql(LqlAst::Select {
+                pattern: "cpu/load".into(),
+                min_strength: Some(0.8),
+                window_ms: Some(1_000),
+            })
+            .unwrap();
+        match select.response.unwrap() {
+            LqlResponse::Select(result) => {
+                assert_eq!(result.stats.count, 1);
+                assert!(result.stats.avg_strength >= 0.8);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let subscribe = field
+            .exec_lql(LqlAst::Subscribe {
+                pattern: "cpu".into(),
+                window_ms: Some(1_000),
+                every_ms: Some(500),
+            })
+            .unwrap();
+        let view_id = match subscribe.response.unwrap() {
+            LqlResponse::Subscribe(result) => result.id,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert!(!subscribe.events.is_empty());
+
+        field.now_ms = 700;
+        field.record_token_hit("cpu", 3, 0.85, 70);
+        let events = field.tick_all(500);
+        assert!(events.iter().any(|ev| ev.contains("\"ev\":\"view\"")));
+
+        let unsubscribe = field.exec_lql(LqlAst::Unsubscribe { id: view_id }).unwrap();
+        match unsubscribe.response.unwrap() {
+            LqlResponse::Unsubscribe(result) => {
+                assert!(result.removed);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        let followup = field.tick_all(500);
+        assert!(
+            followup
+                .iter()
+                .filter(|ev| ev.contains("\"ev\":\"view\""))
+                .count()
+                <= 1
+        );
     }
 
     #[test]
