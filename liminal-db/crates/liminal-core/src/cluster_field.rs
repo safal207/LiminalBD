@@ -14,8 +14,9 @@ use crate::lql::{
     LqlUnsubscribeResult,
 };
 use crate::node_cell::NodeCell;
-use crate::reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule};
+use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
 use crate::seed::{create_seed, SeedParams};
+use crate::symmetry::HarmonySnapshot;
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
 use crate::views::{NodeHitStat, ViewRegistry, ViewStats};
@@ -44,6 +45,7 @@ pub struct ClusterField {
     pub views: ViewRegistry,
     next_hit_seq: u64,
     view_tick_accum: u64,
+    reflex_engine: ReflexEngine,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +105,7 @@ impl ClusterField {
             views: ViewRegistry::new(),
             next_hit_seq: 1,
             view_tick_accum: 0,
+            reflex_engine: ReflexEngine::new(2_000),
         }
     }
 
@@ -217,6 +220,20 @@ impl ClusterField {
             hits.retain(|hit| hit.strength >= min_strength);
         }
         self.stats_from_hits(&hits)
+    }
+
+    pub fn symmetry_samples(&self, window_ms: u32) -> Vec<(String, Hit)> {
+        let cutoff = self.now_ms.saturating_sub(window_ms as u64);
+        let mut samples: Vec<(String, Hit)> = Vec::new();
+        for (token, queue) in &self.token_hits {
+            for hit in queue.iter().rev() {
+                if hit.ts < cutoff {
+                    break;
+                }
+                samples.push((token.clone(), hit.clone()));
+            }
+        }
+        samples
     }
 
     pub fn exec_lql(&mut self, ast: LqlAst) -> LqlResult {
@@ -1125,6 +1142,32 @@ impl ClusterField {
                 events.push(ViewRegistry::build_event(&view, &stats));
             }
         }
+        let harmony_snapshot = {
+            let window = self.reflex_engine.window();
+            let samples = self.symmetry_samples(window);
+            self.reflex_engine.tick(self.now_ms, dt_ms, &samples)
+        };
+        if let Some(snapshot) = harmony_snapshot {
+            let mirror_value = snapshot
+                .mirror
+                .as_ref()
+                .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null);
+            let event = json!({
+                "ev": "harmony",
+                "meta": {
+                    "strength": snapshot.metrics.avg_strength,
+                    "latency": snapshot.metrics.avg_latency,
+                    "entropy": snapshot.entropy_ratio,
+                    "delta_strength": snapshot.delta_strength,
+                    "delta_latency": snapshot.delta_latency,
+                    "status": snapshot.status.as_str(),
+                    "pattern": snapshot.dominant_pattern,
+                    "mirror": mirror_value,
+                }
+            });
+            events.push(event.to_string());
+        }
         events
     }
 
@@ -1203,6 +1246,18 @@ impl ClusterField {
                 )
             })
             .collect()
+    }
+
+    pub fn symmetry_snapshot(&self) -> HarmonySnapshot {
+        self.reflex_engine.snapshot()
+    }
+
+    pub fn set_mirror_interval(&mut self, interval_ms: u64) {
+        self.reflex_engine.set_interval(interval_ms);
+    }
+
+    pub fn mirror_interval(&self) -> u64 {
+        self.reflex_engine.interval()
     }
 
     pub fn apply_delta(&mut self, delta: &EventDelta) {
@@ -1340,6 +1395,7 @@ mod tests {
     use super::*;
     use crate::reflex::ReflexWhen;
     use crate::types::Hint;
+    use serde_json::Value;
 
     #[test]
     fn reflex_fire_on_window_threshold() {
@@ -1491,6 +1547,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn harmony_event_emits_with_mirror() {
+        let mut field = ClusterField::new();
+        field.add_root("cpu/load");
+        field.set_mirror_interval(400);
+        for i in 0..4 {
+            field.now_ms = (i * 100) as u64;
+            let _ = field.route_impulse(Impulse {
+                kind: ImpulseKind::Query,
+                pattern: "cpu/load".into(),
+                strength: 0.9,
+                ttl_ms: 1_000,
+                tags: Vec::new(),
+            });
+        }
+        let events = field.tick_all(400);
+        let harmony_line = events
+            .iter()
+            .find(|line| line.contains("\"harmony\""))
+            .expect("expected harmony event");
+        let payload: Value = serde_json::from_str(harmony_line).expect("valid json");
+        assert_eq!(payload["ev"], "harmony");
+        assert!(payload["meta"]["mirror"].is_object());
+        assert!(payload["meta"]["entropy"].is_number());
+    }
+
+    #[test]
+    fn harmony_event_repeats_on_interval() {
+        let mut field = ClusterField::new();
+        field.add_root("cpu/load");
+        field.set_mirror_interval(300);
+        field.tick_all(300);
+        let first = field.tick_all(300);
+        assert!(first.iter().any(|line| line.contains("\"harmony\"")));
+        let second = field.tick_all(300);
+        assert!(second.iter().any(|line| line.contains("\"harmony\"")));
+    }
+
     fn extract_metric(line: &str, prefix: &str) -> usize {
         line.split_whitespace()
             .find_map(|token| token.strip_prefix(prefix))
@@ -1637,6 +1731,59 @@ mod tests {
         let base = score_cell(&cell, &impulse, 1.0);
         let boosted = score_cell(&cell, &impulse, 1.3);
         assert!(boosted > base);
+    }
+
+    fn drive_harmony(field: &mut ClusterField) {
+        field.add_root("cpu/load");
+        for idx in 0..4 {
+            field.now_ms = (idx * 200) as u64;
+            let _ = field.route_impulse(Impulse {
+                kind: ImpulseKind::Query,
+                pattern: "cpu/load".into(),
+                strength: 0.9,
+                ttl_ms: 1_000,
+                tags: Vec::new(),
+            });
+        }
+    }
+
+    #[test]
+    fn harmony_event_emitted_on_interval() {
+        let mut field = ClusterField::new();
+        drive_harmony(&mut field);
+        field.set_mirror_interval(400);
+        let mut harmony_seen = 0;
+        for _ in 0..5 {
+            let events = field.tick_all(400);
+            if events.iter().any(|ev| ev.contains("\"ev\":\"harmony\"")) {
+                harmony_seen += 1;
+            }
+        }
+        assert!(harmony_seen >= 1, "expected harmony events to be emitted");
+    }
+
+    #[test]
+    fn harmony_event_contains_mirror_signal() {
+        let mut field = ClusterField::new();
+        drive_harmony(&mut field);
+        field.set_mirror_interval(400);
+        let mut mirror_present = false;
+        for _ in 0..6 {
+            let events = field.tick_all(400);
+            for ev in events {
+                if ev.contains("\"ev\":\"harmony\"") {
+                    assert!(ev.contains("\"mirror\""));
+                    mirror_present = true;
+                }
+            }
+            if mirror_present {
+                break;
+            }
+        }
+        assert!(
+            mirror_present,
+            "mirror impulse not observed in harmony event"
+        );
     }
 }
 

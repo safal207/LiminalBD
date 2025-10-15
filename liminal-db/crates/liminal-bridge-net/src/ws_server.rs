@@ -30,6 +30,8 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
         .with_context(|| format!("failed to bind websocket server to {addr}"))?;
     info!(addr = %addr, "ws_server.listening");
 
+    let latest_harmony = Arc::new(Mutex::new(None::<JsonValue>));
+
     loop {
         let (stream, peer) = listener
             .accept()
@@ -39,6 +41,7 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
         let hub = global_hub();
         let default_format = hub.default_format();
         let client_id = NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let harmony_cache = latest_harmony.clone();
 
         tokio::spawn(async move {
             let ws_stream = match accept_async(stream).await {
@@ -65,12 +68,31 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
             let mut metrics_rx = crate::subscribe_metrics();
             let cmd_tx = command_sender();
 
+            if let Some(payload) = { harmony_cache.lock().await.clone() } {
+                let fmt = {
+                    let guard = format_state.lock().await;
+                    *guard
+                };
+                if let Ok(msg) = encode_cbor_json(&payload, fmt) {
+                    let _ = out_tx.send(msg).await;
+                }
+            }
+
             let out_events_tx = out_tx.clone();
             let format_for_events = format_state.clone();
+            let latest_for_events = harmony_cache.clone();
             let pump_events = async move {
                 loop {
                     match event_rx.recv().await {
                         Ok(StreamEvent { payload }) => {
+                            let is_harmony = payload
+                                .get("ev")
+                                .and_then(|ev| ev.as_str())
+                                .map(|ev| ev == "harmony")
+                                .unwrap_or(false);
+                            if is_harmony {
+                                *latest_for_events.lock().await = Some(payload.clone());
+                            }
                             let fmt = *format_for_events.lock().await;
                             if let Ok(msg) = encode_cbor_json(&payload, fmt) {
                                 if out_events_tx.send(msg).await.is_err() {
