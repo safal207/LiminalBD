@@ -17,6 +17,10 @@ pub struct BridgeConfig {
     pub snap_interval: Option<u32>,
     #[serde(rename = "snap_maxwal", skip_serializing_if = "Option::is_none")]
     pub snap_maxwal: Option<u32>,
+    #[serde(rename = "ws_port", skip_serializing_if = "Option::is_none")]
+    pub ws_port: Option<u16>,
+    #[serde(rename = "ws_format", skip_serializing_if = "Option::is_none")]
+    pub ws_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
