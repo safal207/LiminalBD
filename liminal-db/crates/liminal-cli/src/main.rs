@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use futures_util::{SinkExt, StreamExt};
 use hex::encode as encode_hex;
 use hex::FromHex;
 use liminal_bridge_abi::ffi::{liminal_init, liminal_pull, liminal_push};
@@ -19,8 +21,10 @@ use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats}
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::net::TcpListener;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,6 +33,8 @@ async fn main() -> Result<()> {
     let mut store_path: Option<PathBuf> = None;
     let mut snap_interval_secs: u64 = 60;
     let mut snap_maxwal: u64 = 5_000;
+    let mut ws_port: Option<u16> = None;
+    let mut ws_format: Option<WsFormat> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pipe-cbor" => pipe_cbor = true,
@@ -60,8 +66,33 @@ async fn main() -> Result<()> {
                     return Err(anyhow!("--snap-maxwal must be greater than zero"));
                 }
             }
+            "--ws-port" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--ws-port requires a port number"));
+                };
+                let port = value
+                    .parse::<u16>()
+                    .map_err(|_| anyhow!("--ws-port expects a valid port, got {value}"))?;
+                ws_port = Some(port);
+            }
+            "--ws-format" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--ws-format requires a value"));
+                };
+                ws_format = Some(WsFormat::from_str(&value)?);
+            }
             other => return Err(anyhow!("unknown argument: {other}")),
         }
+    }
+
+    if ws_format.is_some() && ws_port.is_none() {
+        return Err(anyhow!("--ws-format requires --ws-port"));
+    }
+
+    if pipe_cbor && ws_port.is_some() {
+        return Err(anyhow!(
+            "WebSocket options are not available in --pipe-cbor mode"
+        ));
     }
 
     let store_config = store_path.map(|path| StoreRuntimeConfig {
@@ -70,10 +101,15 @@ async fn main() -> Result<()> {
         max_wal_events: snap_maxwal,
     });
 
+    let ws_config = ws_port.map(|port| WsRuntimeConfig {
+        port,
+        format: ws_format.unwrap_or_default(),
+    });
+
     if pipe_cbor {
         run_pipe_cbor(store_config).await
     } else {
-        run_interactive(store_config).await
+        run_interactive(store_config, ws_config).await
     }
 }
 
@@ -84,7 +120,38 @@ struct StoreRuntimeConfig {
     max_wal_events: u64,
 }
 
-async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
+#[derive(Clone)]
+struct WsRuntimeConfig {
+    port: u16,
+    format: WsFormat,
+}
+
+#[derive(Clone, Copy)]
+enum WsFormat {
+    Json,
+}
+
+impl Default for WsFormat {
+    fn default() -> Self {
+        WsFormat::Json
+    }
+}
+
+impl FromStr for WsFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.trim().to_lowercase().as_str() {
+            "json" => Ok(WsFormat::Json),
+            other => Err(anyhow!("unsupported WebSocket format: {other}")),
+        }
+    }
+}
+
+async fn run_interactive(
+    store: Option<StoreRuntimeConfig>,
+    ws: Option<WsRuntimeConfig>,
+) -> Result<()> {
     let (field, journal, store_cfg) = if let Some(cfg) = store.clone() {
         let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
         let (mut field, replay_offset) =
@@ -112,6 +179,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
     let field = StdArc::new(Mutex::new(field));
 
     let (tx, mut rx) = mpsc::channel::<Impulse>(128);
+    let (event_tx, _) = broadcast::channel::<String>(1024);
 
     tokio::spawn(start_host_sensors(tx.clone()));
 
@@ -141,6 +209,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
     }
 
     let field_for_impulses = field.clone();
+    let event_tx_for_impulses = event_tx.clone();
     tokio::spawn(async move {
         while let Some(impulse) = rx.recv().await {
             let logs = {
@@ -148,6 +217,9 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                 guard.route_impulse(impulse)
             };
             for log in logs {
+                if let Some(event) = convert_reflex_log(&log) {
+                    let _ = event_tx_for_impulses.send(event);
+                }
                 println!("IMPULSE {}", log);
             }
         }
@@ -157,6 +229,8 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
 
     let loop_field = field.clone();
     let hints_for_metrics = hint_buffer.clone();
+    let event_tx_for_metrics = event_tx.clone();
+    let event_tx_for_events = event_tx.clone();
     tokio::spawn(async move {
         run_loop(
             loop_field,
@@ -168,6 +242,20 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                     store.clear();
                     snapshot
                 };
+                let metric_event = json!({
+                    "ev": "metrics",
+                    "meta": {
+                        "cells": metrics.cells,
+                        "sleeping_pct": metrics.sleeping_pct,
+                        "active_pct": metrics.active_pct,
+                        "avg_metabolism": metrics.avg_metabolism,
+                        "avg_latency": metrics.avg_latency_ms,
+                        "live_load": metrics.live_load,
+                        "hints": hints.iter().map(hint_label).collect::<Vec<_>>(),
+                    }
+                })
+                .to_string();
+                let _ = event_tx_for_metrics.send(metric_event);
                 println!(
                     "METRICS cells={} sleeping={:.2} active={:.2} avgMet={:.2} avgLat={:.1} live={:.2} | HINTS: {:?}",
                     metrics.cells,
@@ -180,6 +268,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                 );
             },
             move |event| {
+                let _ = event_tx_for_events.send(event.to_string());
                 print_event_line(event);
             },
             move |hint| {
@@ -190,7 +279,19 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
         .await;
     });
 
+    if let Some(ws_cfg) = ws.clone() {
+        let ws_field = field.clone();
+        let ws_impulse_tx = tx.clone();
+        let ws_events = event_tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = run_ws_server(ws_cfg, ws_field, ws_impulse_tx, ws_events).await {
+                eprintln!("WebSocket server error: {err}");
+            }
+        });
+    }
+
     let tx_cli = tx.clone();
+    let event_tx_for_cli = event_tx.clone();
     let journal_for_cli = journal.clone();
     let field_for_cli = field.clone();
     let input_task = tokio::spawn(async move {
@@ -286,6 +387,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
                                             print_lql_response(&response);
                                         }
                                         for event in result.events {
+                                            let _ = event_tx_for_cli.send(event.clone());
                                             print_event_line(&event);
                                         }
                                     }
@@ -313,6 +415,267 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>) -> Result<()> {
 
     input_task.await?;
     Ok(())
+}
+
+async fn run_ws_server(
+    cfg: WsRuntimeConfig,
+    field: StdArc<Mutex<ClusterField>>,
+    impulse_tx: mpsc::Sender<Impulse>,
+    event_tx: broadcast::Sender<String>,
+) -> Result<()> {
+    let addr = format!("127.0.0.1:{}", cfg.port);
+    let listener = TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("failed to bind WebSocket listener on {addr}"))?;
+    println!("WS server listening on ws://{}", addr);
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let ws_field = field.clone();
+        let ws_impulse = impulse_tx.clone();
+        let ws_events = event_tx.clone();
+        let format = cfg.format;
+        tokio::spawn(async move {
+            if let Err(err) =
+                handle_ws_connection(stream, ws_field, ws_impulse, ws_events, format).await
+            {
+                eprintln!("ws connection error: {err}");
+            }
+        });
+    }
+}
+
+async fn handle_ws_connection(
+    stream: tokio::net::TcpStream,
+    field: StdArc<Mutex<ClusterField>>,
+    impulse_tx: mpsc::Sender<Impulse>,
+    event_tx: broadcast::Sender<String>,
+    format: WsFormat,
+) -> Result<()> {
+    let ws_stream = accept_async(stream).await?;
+    let (mut sink, mut source) = ws_stream.split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+
+    let send_task = tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            if sink.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut event_rx = event_tx.subscribe();
+    let out_for_events = out_tx.clone();
+    let events_task = tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            if out_for_events.send(Message::Text(event)).is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(msg) = source.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                process_ws_message(text, &field, &impulse_tx, &event_tx, &out_tx, format).await?;
+            }
+            Ok(Message::Binary(bin)) => {
+                if matches!(format, WsFormat::Json) {
+                    if let Ok(text) = String::from_utf8(bin) {
+                        process_ws_message(text, &field, &impulse_tx, &event_tx, &out_tx, format)
+                            .await?;
+                    } else {
+                        send_ws_error(&out_tx, "binary payload is not valid UTF-8");
+                    }
+                }
+            }
+            Ok(Message::Ping(payload)) => {
+                out_tx.send(Message::Pong(payload)).ok();
+            }
+            Ok(Message::Pong(_)) => {}
+            Ok(Message::Frame(_)) => {}
+            Ok(Message::Close(_)) => break,
+            Err(err) => {
+                return Err(err.into());
+            }
+        }
+    }
+
+    events_task.abort();
+    drop(out_tx);
+    send_task.abort();
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct WsRequest {
+    cmd: String,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    data: Option<WsImpulsePayload>,
+    #[serde(default)]
+    ts: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WsImpulsePayload {
+    #[serde(default)]
+    k: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    p: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    s: Option<f32>,
+    #[serde(default)]
+    strength: Option<f32>,
+    #[serde(default)]
+    t: Option<u64>,
+    #[serde(default)]
+    ttl: Option<u64>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+impl WsImpulsePayload {
+    fn into_impulse(self) -> Result<Impulse> {
+        let pattern = self
+            .p
+            .or(self.pattern)
+            .ok_or_else(|| anyhow!("impulse requires pattern"))?;
+        let kind_str = self.k.or(self.kind).unwrap_or_else(|| "affect".to_string());
+        let kind = parse_impulse_kind(&kind_str)
+            .ok_or_else(|| anyhow!("unsupported impulse kind: {kind_str}"))?;
+        let strength = self.s.or(self.strength).unwrap_or(0.6).clamp(0.0, 1.0);
+        let ttl = self.t.or(self.ttl).unwrap_or(1_500);
+        let tags = self.tags.unwrap_or_default();
+        Ok(Impulse {
+            kind,
+            pattern,
+            strength,
+            ttl_ms: ttl,
+            tags,
+        })
+    }
+}
+
+fn parse_impulse_kind(value: &str) -> Option<ImpulseKind> {
+    match value.to_lowercase().as_str() {
+        "affect" | "a" => Some(ImpulseKind::Affect),
+        "query" | "q" => Some(ImpulseKind::Query),
+        "write" | "w" => Some(ImpulseKind::Write),
+        _ => None,
+    }
+}
+
+async fn process_ws_message(
+    raw: String,
+    field: &StdArc<Mutex<ClusterField>>,
+    impulse_tx: &mpsc::Sender<Impulse>,
+    event_tx: &broadcast::Sender<String>,
+    out_tx: &mpsc::UnboundedSender<Message>,
+    format: WsFormat,
+) -> Result<()> {
+    if !matches!(format, WsFormat::Json) {
+        return Ok(());
+    }
+
+    let request: WsRequest = match serde_json::from_str(&raw) {
+        Ok(req) => req,
+        Err(err) => {
+            send_ws_error(out_tx, &format!("invalid json: {}", err));
+            return Ok(());
+        }
+    };
+
+    match request.cmd.as_str() {
+        "lql" => {
+            let Some(query) = request.q.clone() else {
+                send_ws_error(out_tx, "lql command requires 'q'");
+                return Ok(());
+            };
+            match parse_lql(&query) {
+                Ok(ast) => {
+                    let result = {
+                        let mut guard = field.lock().await;
+                        guard.exec_lql(ast)
+                    };
+                    match result {
+                        Ok(exec) => {
+                            for event in exec.events {
+                                let _ = event_tx.send(event);
+                            }
+                        }
+                        Err(err) => {
+                            let response = json!({
+                                "ev": "lql",
+                                "meta": {
+                                    "query": query,
+                                    "error": err.to_string(),
+                                }
+                            })
+                            .to_string();
+                            out_tx.send(Message::Text(response)).ok();
+                        }
+                    }
+                }
+                Err(err) => {
+                    let response = json!({
+                        "ev": "lql",
+                        "meta": {
+                            "query": query,
+                            "error": err.to_string(),
+                        }
+                    })
+                    .to_string();
+                    out_tx.send(Message::Text(response)).ok();
+                }
+            }
+        }
+        "impulse" => {
+            let Some(payload) = request.data else {
+                send_ws_error(out_tx, "impulse command requires 'data'");
+                return Ok(());
+            };
+            match payload.into_impulse() {
+                Ok(impulse) => {
+                    if impulse_tx.send(impulse).await.is_err() {
+                        send_ws_error(out_tx, "impulse queue unavailable");
+                    }
+                }
+                Err(err) => {
+                    send_ws_error(out_tx, &err.to_string());
+                }
+            }
+        }
+        "ping" => {
+            let response = json!({
+                "ev": "pong",
+                "ts": request.ts,
+            })
+            .to_string();
+            out_tx.send(Message::Text(response)).ok();
+        }
+        other => {
+            send_ws_error(out_tx, &format!("unknown command: {}", other));
+        }
+    }
+
+    Ok(())
+}
+
+fn send_ws_error(out_tx: &mpsc::UnboundedSender<Message>, message: &str) {
+    let payload = json!({
+        "ev": "error",
+        "meta": {
+            "message": message,
+        }
+    })
+    .to_string();
+    out_tx.send(Message::Text(payload)).ok();
 }
 
 async fn run_pipe_cbor(store: Option<StoreRuntimeConfig>) -> Result<()> {
@@ -614,6 +977,134 @@ struct ReflexAddRequest {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn hint_label(hint: &Hint) -> &'static str {
+    match hint {
+        Hint::SlowTick => "slow_tick",
+        Hint::FastTick => "fast_tick",
+        Hint::TrimField => "trim_field",
+        Hint::WakeSeeds => "wake_seeds",
+    }
+}
+
+fn convert_reflex_log(log: &str) -> Option<String> {
+    if let Some(rest) = log.strip_prefix("REFLEX_FIRE ") {
+        let mut id = None;
+        let mut matched = None;
+        for part in rest.split_whitespace() {
+            if let Some(value) = part.strip_prefix("id=") {
+                id = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("matched=") {
+                matched = value.parse::<u16>().ok();
+            }
+        }
+        if let (Some(id), Some(matched)) = (id, matched) {
+            return Some(
+                json!({
+                    "ev": "reflex_fire",
+                    "meta": {"id": id, "matched": matched},
+                })
+                .to_string(),
+            );
+        }
+    }
+    if let Some(rest) = log.strip_prefix("REFLEX_HINT ") {
+        let mut id = None;
+        let mut hint = None;
+        for part in rest.split_whitespace() {
+            if let Some(value) = part.strip_prefix("id=") {
+                id = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("hint=") {
+                hint = Some(value.trim_matches(|c| c == '{' || c == '}'));
+            }
+        }
+        if let (Some(id), Some(hint_value)) = (id, hint) {
+            return Some(
+                json!({
+                    "ev": "reflex_hint",
+                    "meta": {"id": id, "hint": hint_value},
+                })
+                .to_string(),
+            );
+        }
+    }
+    if let Some(rest) = log.strip_prefix("REFLEX_SPAWN ") {
+        let mut id = None;
+        let mut node = None;
+        let mut seed = None;
+        let mut shift = None;
+        for part in rest.split_whitespace() {
+            if let Some(value) = part.strip_prefix("id=") {
+                id = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("node=n") {
+                node = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("seed=") {
+                seed = Some(value.to_string());
+            } else if let Some(value) = part.strip_prefix("shift=") {
+                shift = value.parse::<f32>().ok();
+            }
+        }
+        if let (Some(id), Some(node), Some(seed), Some(shift)) = (id, node, seed, shift) {
+            return Some(
+                json!({
+                    "ev": "reflex_spawn",
+                    "meta": {"id": id, "node": node, "seed": seed, "shift": shift},
+                })
+                .to_string(),
+            );
+        }
+    }
+    if let Some(rest) = log.strip_prefix("REFLEX_WAKE ") {
+        let mut id = None;
+        let mut requested = None;
+        let mut woke = None;
+        for part in rest.split_whitespace() {
+            if let Some(value) = part.strip_prefix("id=") {
+                id = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("requested=") {
+                requested = value.parse::<u32>().ok();
+            } else if let Some(value) = part.strip_prefix("woke=") {
+                woke = value.parse::<u32>().ok();
+            }
+        }
+        if let (Some(id), Some(requested), Some(woke)) = (id, requested, woke) {
+            return Some(
+                json!({
+                    "ev": "reflex_wake",
+                    "meta": {"id": id, "requested": requested, "woke": woke},
+                })
+                .to_string(),
+            );
+        }
+    }
+    if let Some(rest) = log.strip_prefix("REFLEX_BOOST ") {
+        let mut id = None;
+        let mut top = None;
+        let mut factor = None;
+        let mut boosted = None;
+        for part in rest.split_whitespace() {
+            if let Some(value) = part.strip_prefix("id=") {
+                id = value.parse::<u64>().ok();
+            } else if let Some(value) = part.strip_prefix("top=") {
+                top = value.parse::<u32>().ok();
+            } else if let Some(value) = part.strip_prefix("factor=") {
+                factor = value.parse::<f32>().ok();
+            } else if let Some(value) = part.strip_prefix("boosted=") {
+                boosted = value.parse::<u32>().ok();
+            }
+        }
+        if let (Some(id), Some(top), Some(factor), Some(boosted)) = (id, top, factor, boosted) {
+            return Some(
+                json!({
+                    "ev": "reflex_boost",
+                    "meta": {"id": id, "top": top, "factor": factor, "boosted": boosted},
+                })
+                .to_string(),
+            );
+        }
+    }
+    None
 }
 
 fn print_event_line(raw: &str) {
