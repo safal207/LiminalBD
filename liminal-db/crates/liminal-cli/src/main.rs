@@ -19,8 +19,8 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    parse_lql, ClusterField, LqlResponse, ReflexAction, ReflexRule, ReflexWhen, TrsConfig,
-    ViewStats,
+    parse_lql, ClusterField, HarmonyMetrics, HarmonySnapshot, LqlResponse, MirrorImpulse,
+    ReflexAction, ReflexRule, ReflexWhen, SymmetryStatus, TrsConfig, ViewStats,
 };
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
     let mut ws_port: u16 = 8787;
     let mut ws_format = StreamFormat::Json;
     let mut nexus_client: Option<String> = None;
+    let mut mirror_interval_ms: u64 = 2_000;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pipe-cbor" => pipe_cbor = true,
@@ -97,6 +98,17 @@ async fn main() -> Result<()> {
                 };
                 nexus_client = Some(url);
             }
+            "--mirror-interval" => {
+                let Some(value) = args.next() else {
+                    return Err(anyhow!("--mirror-interval requires milliseconds"));
+                };
+                mirror_interval_ms = value.parse::<u64>().map_err(|_| {
+                    anyhow!("--mirror-interval expects a positive number, got {value}")
+                })?;
+                if mirror_interval_ms < 200 {
+                    return Err(anyhow!("--mirror-interval must be at least 200"));
+                }
+            }
             other => return Err(anyhow!("unknown argument: {other}")),
         }
     }
@@ -116,7 +128,7 @@ async fn main() -> Result<()> {
     if pipe_cbor {
         run_pipe_cbor(store_config).await
     } else {
-        run_interactive(store_config, ws_runtime).await
+        run_interactive(store_config, ws_runtime, mirror_interval_ms).await
     }
 }
 
@@ -134,8 +146,12 @@ struct WsRuntimeConfig {
     nexus_client: Option<String>,
 }
 
-async fn run_interactive(store: Option<StoreRuntimeConfig>, ws: WsRuntimeConfig) -> Result<()> {
-    let (field, journal, store_cfg) = if let Some(cfg) = store.clone() {
+async fn run_interactive(
+    store: Option<StoreRuntimeConfig>,
+    ws: WsRuntimeConfig,
+    mirror_interval_ms: u64,
+) -> Result<()> {
+    let (mut field, journal, store_cfg) = if let Some(cfg) = store.clone() {
         let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
         let (mut field, replay_offset) =
             if let Some((seed, offset)) = journal.load_latest_snapshot()? {
@@ -159,6 +175,7 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>, ws: WsRuntimeConfig)
         field.add_root("liminal/root");
         (field, None, None)
     };
+    field.set_mirror_interval(mirror_interval_ms);
     let field = StdArc::new(Mutex::new(field));
 
     let (tx, mut rx) = mpsc::channel::<Impulse>(128);
@@ -329,6 +346,13 @@ async fn run_interactive(store: Option<StoreRuntimeConfig>, ws: WsRuntimeConfig)
                         } else {
                             eprintln!("storage not configured; use --store to enable snapshots");
                         }
+                    }
+                    "harmony" => {
+                        let snapshot = {
+                            let guard = field_for_cli.lock().await;
+                            guard.symmetry_snapshot()
+                        };
+                        print_harmony_snapshot(&snapshot);
                     }
                     "stats" => {
                         if let Some(journal) = &journal_for_cli {
@@ -869,6 +893,7 @@ fn print_event_line(raw: &str) {
             if let Some(line) = match event {
                 "view" => format_view_event(&value),
                 "lql" => format_lql_event(&value),
+                "harmony" => format_harmony_event(&value),
                 _ => None,
             } {
                 println!("{}", line);
@@ -933,6 +958,39 @@ fn format_lql_event(value: &JsonValue) -> Option<String> {
         ));
     }
     None
+}
+
+fn format_harmony_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let strength = meta.get("strength")?.as_f64()?;
+    let latency = meta.get("latency")?.as_f64()?;
+    let entropy = meta.get("entropy")?.as_f64()?;
+    let delta_strength = meta
+        .get("delta_strength")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let delta_latency = meta
+        .get("delta_latency")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let status = meta
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ok")
+        .to_uppercase();
+    let pattern = meta.get("pattern").and_then(|v| v.as_str()).unwrap_or("-");
+    let mirror = match meta.get("mirror") {
+        Some(JsonValue::Object(obj)) => {
+            let strength = obj.get("s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ts = obj.get("t").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!("{strength:.3}@{ts}")
+        }
+        _ => "-".into(),
+    };
+    Some(format!(
+        "HARMONY status={} strength={:.3} latency={:.1} entropy={:.3} d_str={:.3} d_lat={:.1} pattern={} mirror={}",
+        status, strength, latency, entropy, delta_strength, delta_latency, pattern, mirror
+    ))
 }
 
 fn extract_stats_from_json(stats: &JsonValue) -> Option<(u32, f64, f64, String)> {
@@ -1011,6 +1069,34 @@ fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, String) {
     (count, avg_strength, avg_latency, top)
 }
 
+fn render_harmony_snapshot_line(snapshot: &HarmonySnapshot) -> String {
+    let status = snapshot.status.as_str().to_uppercase();
+    let pattern = snapshot
+        .dominant_pattern
+        .clone()
+        .unwrap_or_else(|| "-".into());
+    let mirror = snapshot
+        .mirror
+        .as_ref()
+        .map(|m| format!("{:.3}@{}", m.strength, m.timestamp_ms))
+        .unwrap_or_else(|| "-".into());
+    format!(
+        "HARMONY status={} strength={:.3} latency={:.1} entropy={:.3} d_str={:.3} d_lat={:.1} pattern={} mirror={}",
+        status,
+        snapshot.metrics.avg_strength,
+        snapshot.metrics.avg_latency,
+        snapshot.entropy_ratio,
+        snapshot.delta_strength,
+        snapshot.delta_latency,
+        pattern,
+        mirror
+    )
+}
+
+fn print_harmony_snapshot(snapshot: &HarmonySnapshot) {
+    println!("{}", render_harmony_snapshot_line(snapshot));
+}
+
 fn parse_command(line: &str) -> Option<Impulse> {
     let mut parts = line.split_whitespace();
     let cmd = parts.next()?;
@@ -1034,4 +1120,56 @@ fn parse_command(line: &str) -> Option<Impulse> {
         ttl_ms: 1_500,
         tags: vec!["cli".into()],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn harmony_event_formatter_reports_status() {
+        let payload = json!({
+            "ev": "harmony",
+            "meta": {
+                "strength": 0.55,
+                "latency": 120.0,
+                "entropy": 0.82,
+                "delta_strength": 0.3,
+                "delta_latency": -4.5,
+                "status": "drift",
+                "pattern": "cpu/load",
+                "mirror": {"k": "mirror", "p": "cpu/load", "s": -0.3, "t": 1_234u64}
+            }
+        });
+        let formatted = format_harmony_event(&payload).expect("formatted harmony");
+        assert!(formatted.contains("status=DRIFT"));
+        assert!(formatted.contains("mirror=-0.300@1234"));
+    }
+
+    #[test]
+    fn render_harmony_snapshot_outputs_state() {
+        let snapshot = HarmonySnapshot {
+            metrics: HarmonyMetrics {
+                avg_strength: 0.61,
+                avg_latency: 142.0,
+                entropy: 0.68,
+            },
+            delta_strength: 0.22,
+            delta_latency: -3.1,
+            entropy_ratio: 0.68,
+            dominant_pattern: Some("cpu/load".into()),
+            status: SymmetryStatus::Drift,
+            mirror: Some(MirrorImpulse {
+                kind: "mirror",
+                pattern: "cpu/load".into(),
+                strength: -0.22,
+                timestamp_ms: 123,
+            }),
+        };
+        let line = render_harmony_snapshot_line(&snapshot);
+        assert!(line.contains("status=DRIFT"));
+        assert!(line.contains("pattern=cpu/load"));
+        assert!(line.contains("mirror=-0.220@123"));
+    }
 }
