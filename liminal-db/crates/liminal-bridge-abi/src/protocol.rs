@@ -40,6 +40,11 @@ pub enum ProtocolCommand {
     TrsSet { cfg: TrsConfig },
     #[serde(rename = "trs_target")]
     TrsTarget { value: f32 },
+    #[serde(rename = "lql")]
+    Lql {
+        #[serde(rename = "q")]
+        query: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

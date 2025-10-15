@@ -2,8 +2,10 @@ use std::cell::RefCell;
 
 use js_sys::Uint8Array;
 use liminal_core::morph_mind::{analyze, hints as gather_hints};
+use liminal_core::parse_lql;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
+use serde_json::json;
 use wasm_bindgen::prelude::*;
 
 use crate::protocol::{
@@ -49,15 +51,55 @@ impl WasmState {
                     }
                 }
             }
-            ProtocolPush::Command(command) => {
-                let event_string = match command {
-                    ProtocolCommand::TrsSet { cfg } => self.field.set_trs_config(cfg),
-                    ProtocolCommand::TrsTarget { value } => self.field.set_trs_target(value),
-                };
-                if let Some(event) = event_from_field_log(&event_string, self.tick_ms) {
-                    self.outbox.push_event(event);
+            ProtocolPush::Command(command) => match command {
+                ProtocolCommand::TrsSet { cfg } => {
+                    let event_string = self.field.set_trs_config(cfg);
+                    if let Some(event) = event_from_field_log(&event_string, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
                 }
-            }
+                ProtocolCommand::TrsTarget { value } => {
+                    let event_string = self.field.set_trs_target(value);
+                    if let Some(event) = event_from_field_log(&event_string, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
+                }
+                ProtocolCommand::Lql { query } => {
+                    let mut events: Vec<String> = Vec::new();
+                    match parse_lql(&query) {
+                        Ok(ast) => match self.field.exec_lql(ast) {
+                            Ok(result) => events.extend(result.events),
+                            Err(err) => events.push(
+                                json!({
+                                    "ev": "lql",
+                                    "meta": {
+                                        "error": err.to_string(),
+                                        "query": query,
+                                    }
+                                })
+                                .to_string(),
+                            ),
+                        },
+                        Err(err) => {
+                            events.push(
+                                json!({
+                                    "ev": "lql",
+                                    "meta": {
+                                        "error": err.to_string(),
+                                        "query": query,
+                                    }
+                                })
+                                .to_string(),
+                            );
+                        }
+                    }
+                    for event_string in events {
+                        if let Some(event) = event_from_field_log(&event_string, self.tick_ms) {
+                            self.outbox.push_event(event);
+                        }
+                    }
+                }
+            },
         }
     }
 
