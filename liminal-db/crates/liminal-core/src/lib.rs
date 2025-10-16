@@ -5,6 +5,7 @@ pub mod lql;
 pub mod morph_mind;
 pub mod node_cell;
 pub mod reflex;
+pub mod security;
 pub mod seed;
 pub mod symmetry;
 pub mod trs;
@@ -21,6 +22,7 @@ pub use lql::{
 pub use morph_mind::{analyze, hints};
 pub use node_cell::NodeCell;
 pub use reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule, ReflexWhen};
+pub use security::{hash_secret, Access, AccessError, ApiKey, NsId, Quotas, Role, TokenBucket};
 pub use seed::{create_seed, SeedParams};
 pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop, SymmetryStatus};
 pub use trs::{TrsConfig, TrsOutput, TrsState};
