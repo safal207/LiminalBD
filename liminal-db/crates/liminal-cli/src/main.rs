@@ -19,8 +19,8 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    parse_lql, ClusterField, HarmonyMetrics, HarmonySnapshot, LqlResponse, MirrorImpulse,
-    ReflexAction, ReflexRule, ReflexWhen, SymmetryStatus, TrsConfig, ViewStats,
+    parse_lql, ClusterField, HarmonySnapshot, LqlResponse, ReflexAction, ReflexRule,
+    ReflexWhen, TrsConfig, ViewStats,
 };
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
@@ -1131,6 +1131,7 @@ fn parse_command(line: &str) -> Option<Impulse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
     use serde_json::json;
 
     #[test]
