@@ -625,6 +625,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "serde",
+ "serde_cbor",
  "serde_json",
  "thiserror",
  "tokio",

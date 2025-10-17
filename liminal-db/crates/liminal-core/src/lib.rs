@@ -27,4 +27,4 @@ pub use seed::{create_seed, SeedParams};
 pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop, SymmetryStatus};
 pub use trs::{TrsConfig, TrsOutput, TrsState};
 pub use types::{Hint, Impulse, ImpulseKind, Metrics, NodeId, NodeState};
-pub use views::{NodeHitStat, ViewId, ViewRegistry, ViewStats};
+pub use views::{NodeHitStat, ViewFilter, ViewId, ViewRegistry, ViewStats};

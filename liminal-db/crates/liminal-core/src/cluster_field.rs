@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::Rng;
+use serde::Serialize;
 use serde_json::json;
 
 use crate::journal::{
@@ -19,7 +20,7 @@ use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
-use crate::views::{NodeHitStat, ViewRegistry, ViewStats};
+use crate::views::{NodeHitStat, ViewFilter, ViewRegistry, ViewStats};
 
 pub type FieldEvents = Vec<String>;
 
@@ -46,6 +47,8 @@ pub struct ClusterField {
     next_hit_seq: u64,
     view_tick_accum: u64,
     reflex_engine: ReflexEngine,
+    important_cells: HashSet<NodeId>,
+    noradrenaline: Option<NoradrenalineEffect>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +71,12 @@ pub struct HarmonyTuning {
     pub affinity_scale: f32,
     pub metabolism_scale: f32,
     pub sleep_delta: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NoradrenalineEffect {
+    until_ms: u64,
+    strength: f32,
 }
 
 impl Default for HarmonyTuning {
@@ -106,6 +115,8 @@ impl ClusterField {
             next_hit_seq: 1,
             view_tick_accum: 0,
             reflex_engine: ReflexEngine::new(2_000),
+            important_cells: HashSet::new(),
+            noradrenaline: None,
         }
     }
 
@@ -165,6 +176,85 @@ impl ClusterField {
         hits
     }
 
+    pub fn important_cells(&self) -> &HashSet<NodeId> {
+        &self.important_cells
+    }
+
+    pub fn partial_snapshot(&self, ids: &HashSet<NodeId>) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct PartialSnapshotEnvelope {
+            now_ms: u64,
+            cells: Vec<CellSnapshot>,
+        }
+
+        let mut cells = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(cell) = self.cells.get(id) {
+                cells.push(CellSnapshot::from(cell));
+            }
+        }
+        let envelope = PartialSnapshotEnvelope {
+            now_ms: self.now_ms,
+            cells,
+        };
+        serde_cbor::to_vec(&envelope).unwrap_or_default()
+    }
+
+    fn noradrenaline_active(&self) -> Option<NoradrenalineEffect> {
+        self.noradrenaline.and_then(|effect| {
+            if self.now_ms < effect.until_ms {
+                Some(effect)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn affinity_scale_for(&self, cell: &NodeCell) -> f32 {
+        let mut scale = self.harmony.affinity_scale;
+        if cell.adreno_tag {
+            if let Some(effect) = self.noradrenaline_active() {
+                scale *= 1.0 + 0.25 * effect.strength;
+            }
+        }
+        scale
+    }
+
+    fn refresh_important_cells(&mut self) {
+        let mut next: HashSet<NodeId> = HashSet::new();
+        for (id, cell) in &self.cells {
+            if cell.salience >= 0.7 {
+                let since_recall = self.now_ms.saturating_sub(cell.last_recall_ms);
+                if since_recall <= 10_000 {
+                    next.insert(*id);
+                }
+            }
+        }
+        self.important_cells = next;
+    }
+
+    fn apply_filters(&self, hits: &mut Vec<Hit>, filter: &ViewFilter) {
+        if let Some(min_strength) = filter.min_strength {
+            hits.retain(|hit| hit.strength >= min_strength);
+        }
+        if let Some(min_salience) = filter.min_salience {
+            hits.retain(|hit| {
+                self.cells
+                    .get(&hit.node)
+                    .map(|cell| cell.salience >= min_salience)
+                    .unwrap_or(false)
+            });
+        }
+        if let Some(adreno) = filter.adreno {
+            hits.retain(|hit| {
+                self.cells
+                    .get(&hit.node)
+                    .map(|cell| cell.adreno_tag == adreno)
+                    .unwrap_or(false)
+            });
+        }
+    }
+
     fn gather_hits_for_pattern(&self, pattern: &str, window_ms: u32) -> Vec<Hit> {
         let tokens = tokenize(pattern);
         if tokens.is_empty() {
@@ -190,6 +280,15 @@ impl ClusterField {
         let count = hits.len() as u32;
         let total_strength: f32 = hits.iter().map(|hit| hit.strength).sum();
         let total_latency: f32 = hits.iter().map(|hit| hit.latency_ms as f32).sum();
+        let emotional_hits = hits
+            .iter()
+            .filter(|hit| {
+                self.cells
+                    .get(&hit.node)
+                    .map(|cell| cell.adreno_tag)
+                    .unwrap_or(false)
+            })
+            .count() as f32;
         let mut node_counts: HashMap<NodeId, u32> = HashMap::new();
         for hit in hits {
             *node_counts.entry(hit.node).or_insert(0) += 1;
@@ -205,6 +304,11 @@ impl ClusterField {
             avg_strength: (total_strength / count as f32).clamp(0.0, 1.0),
             avg_latency: total_latency / count as f32,
             top_nodes,
+            emotional_load: if count == 0 {
+                0.0
+            } else {
+                (emotional_hits / count as f32).clamp(0.0, 1.0)
+            },
         }
     }
 
@@ -212,13 +316,11 @@ impl ClusterField {
         &self,
         pattern: &str,
         window_ms: u32,
-        min_strength: Option<f32>,
+        filter: &ViewFilter,
     ) -> ViewStats {
         let window = window_ms.max(1);
         let mut hits = self.gather_hits_for_pattern(pattern, window);
-        if let Some(min_strength) = min_strength {
-            hits.retain(|hit| hit.strength >= min_strength);
-        }
+        self.apply_filters(&mut hits, filter);
         self.stats_from_hits(&hits)
     }
 
@@ -240,15 +342,17 @@ impl ClusterField {
         match ast {
             LqlAst::Select {
                 pattern,
-                min_strength,
                 window_ms,
+                filter,
             } => {
                 let window = window_ms.unwrap_or(DEFAULT_WINDOW_MS).max(1);
-                let stats = self.stats_for_pattern(&pattern, window, min_strength);
+                let stats = self.stats_for_pattern(&pattern, window, &filter);
                 let payload = LqlSelectResult {
                     pattern: pattern.clone(),
                     window_ms: window,
-                    min_strength,
+                    min_strength: filter.min_strength,
+                    min_salience: filter.min_salience,
+                    adreno: filter.adreno,
                     stats: stats.clone(),
                 };
                 let event = json!({
@@ -267,17 +371,25 @@ impl ClusterField {
                 pattern,
                 window_ms,
                 every_ms,
+                filter,
             } => {
                 let window = window_ms.unwrap_or(DEFAULT_WINDOW_MS).max(1);
                 let every = every_ms.unwrap_or(DEFAULT_VIEW_EVERY_MS).max(200);
-                let id = self
-                    .views
-                    .add_view(pattern.clone(), window, every, self.now_ms);
+                let id = self.views.add_view(
+                    pattern.clone(),
+                    window,
+                    every,
+                    self.now_ms,
+                    filter.clone(),
+                );
                 let payload = LqlSubscribeResult {
                     id,
                     pattern: pattern.clone(),
                     window_ms: window,
                     every_ms: every,
+                    min_strength: filter.min_strength,
+                    min_salience: filter.min_salience,
+                    adreno: filter.adreno,
                 };
                 let event = json!({
                     "ev": "lql",
@@ -937,6 +1049,20 @@ impl ClusterField {
         let tokens = tokenize(&imp.pattern);
         let mut seen_tokens = HashSet::new();
         let mut logs = Vec::new();
+        let mut energy_deltas: Vec<EventDelta> = Vec::new();
+
+        if imp.pattern == "affect/noradrenaline" {
+            let until = self.now_ms.saturating_add(imp.ttl_ms);
+            self.noradrenaline = Some(NoradrenalineEffect {
+                until_ms: until,
+                strength: imp.strength.clamp(0.0, 1.0),
+            });
+            logs.push(format!(
+                "HORMONE noradrenaline s={:.2} window={}ms",
+                imp.strength, imp.ttl_ms
+            ));
+            logs.push("ASTRO TAG on".into());
+        }
         let mut fired_rules = HashSet::new();
         for token in tokens.iter().cloned() {
             if seen_tokens.insert(token.clone()) {
@@ -956,7 +1082,8 @@ impl ClusterField {
             .into_iter()
             .filter_map(|id| {
                 self.cells.get(&id).map(|cell| {
-                    let mut score = score_cell(cell, &imp, self.harmony.affinity_scale);
+                    let affinity_scale = self.affinity_scale_for(cell);
+                    let mut score = score_cell(cell, &imp, affinity_scale);
                     let mut best_bias = 1.0f32;
                     for token in &tokens {
                         if let Some(bias) = self.route_bias.get(&(token.clone(), id)) {
@@ -974,8 +1101,9 @@ impl ClusterField {
         let mut responded: Vec<(NodeId, u32)> = Vec::new();
         for (_score, id) in scored.into_iter().take(3) {
             if let Some(cell) = self.cells.get_mut(&id) {
+                let before_salience = cell.salience;
                 let previous = cell.last_response_ms;
-                if let Some(log) = cell.ingest(&imp) {
+                if let Some(log) = cell.ingest(&imp, self.now_ms) {
                     cell.last_response_ms = self.now_ms;
                     let delta = EventDelta::Energy(EnergyDelta {
                         id,
@@ -985,9 +1113,15 @@ impl ClusterField {
                         last_response_ms: cell.last_response_ms,
                     });
                     logs.push(log);
-                    self.emit(delta);
+                    energy_deltas.push(delta);
                     let latency = self.now_ms.saturating_sub(previous).min(u32::MAX as u64) as u32;
                     responded.push((id, latency));
+                    if (cell.salience - before_salience).abs() > f32::EPSILON {
+                        logs.push(format!(
+                            "SALIENCE n{} {:.2}->{:.2}",
+                            id, before_salience, cell.salience
+                        ));
+                    }
                 }
             }
         }
@@ -1010,6 +1144,9 @@ impl ClusterField {
             }
         }
         self.ticks_since_impulse = 0;
+        for delta in energy_deltas {
+            self.emit(delta);
+        }
         logs
     }
 
@@ -1019,14 +1156,19 @@ impl ClusterField {
             now_ms: self.now_ms,
         }));
         let ids: Vec<NodeId> = self.cells.keys().copied().collect();
+        let hormone = self.noradrenaline_active();
+        let base_sleep = self.harmony.sleep_delta;
         let mut pending_events: Vec<EventDelta> = Vec::new();
         for id in &ids {
             if let Some(cell) = self.cells.get_mut(id) {
-                cell.tick(
-                    dt_ms,
-                    self.harmony.metabolism_scale,
-                    self.harmony.sleep_delta,
-                );
+                let sleep_shift = if cell.adreno_tag {
+                    hormone
+                        .map(|effect| (base_sleep - 0.2 * effect.strength).clamp(-0.4, 0.2))
+                        .unwrap_or(base_sleep)
+                } else {
+                    base_sleep
+                };
+                cell.tick(dt_ms, self.harmony.metabolism_scale, sleep_shift);
                 cell.drift_affinity(self.harmony.alpha);
                 pending_events.push(EventDelta::Energy(EnergyDelta {
                     id: *id,
@@ -1038,6 +1180,12 @@ impl ClusterField {
             }
         }
         let mut events: FieldEvents = Vec::new();
+        if let Some(effect) = self.noradrenaline {
+            if self.now_ms >= effect.until_ms {
+                self.noradrenaline = None;
+                events.push("ASTRO TAG off".into());
+            }
+        }
         let mut new_cells: Vec<(NodeId, NodeCell)> = Vec::new();
         let mut purge_ids: Vec<NodeId> = Vec::new();
         for id in &ids {
@@ -1091,7 +1239,14 @@ impl ClusterField {
         for id in ids {
             if let Some(cell) = self.cells.get_mut(&id) {
                 let prev_state = cell.state;
-                let died = cell.maybe_sleep_or_die(self.now_ms, self.harmony.sleep_delta);
+                let sleep_shift = if cell.adreno_tag {
+                    hormone
+                        .map(|effect| (base_sleep - 0.2 * effect.strength).clamp(-0.4, 0.2))
+                        .unwrap_or(base_sleep)
+                } else {
+                    base_sleep
+                };
+                let died = cell.maybe_sleep_or_die(self.now_ms, sleep_shift);
                 if prev_state != NodeState::Sleep && cell.state == NodeState::Sleep {
                     events.push(format!("SLEEP n{}", id));
                     pending_events.push(EventDelta::Sleep(StateDelta { id }));
@@ -1122,6 +1277,7 @@ impl ClusterField {
         for id in purge_ids {
             self.purge_tracking_for(id);
         }
+        self.refresh_important_cells();
         self.ticks_since_impulse = self.ticks_since_impulse.saturating_add(1);
         let total_cells = self.cells.len();
         let sleeping_cells = self
@@ -1138,7 +1294,7 @@ impl ClusterField {
             self.view_tick_accum -= 500;
             let due = self.views.take_due(self.now_ms);
             for view in due {
-                let stats = self.stats_for_pattern(&view.pattern, view.window_ms, None);
+                let stats = self.stats_for_pattern(&view.pattern, view.window_ms, &view.filter);
                 events.push(ViewRegistry::build_event(&view, &stats));
             }
         }
@@ -1173,10 +1329,30 @@ impl ClusterField {
 
     pub fn trim_low_energy(&mut self) {
         let before = self.cells.len();
+        let mut rng = rand::thread_rng();
+        for cell in self.cells.values_mut() {
+            if cell.adreno_tag || cell.salience >= 0.7 {
+                continue;
+            }
+            if cell.salience < 0.2
+                && self.now_ms.saturating_sub(cell.last_recall_ms) > 60_000
+                && rng.gen_bool(0.35)
+            {
+                if cell.state == NodeState::Active {
+                    cell.state = NodeState::Sleep;
+                }
+                if cell.energy < 0.05 && rng.gen_bool(0.25) {
+                    cell.state = NodeState::Dead;
+                }
+            }
+        }
         let victims: Vec<NodeId> = self
             .cells
             .iter()
             .filter_map(|(id, cell)| {
+                if cell.adreno_tag || cell.salience >= 0.7 {
+                    return None;
+                }
                 if cell.energy <= 0.1 || cell.state == NodeState::Dead {
                     Some(*id)
                 } else {
@@ -1184,8 +1360,12 @@ impl ClusterField {
                 }
             })
             .collect();
-        self.cells
-            .retain(|_, cell| cell.energy > 0.1 && cell.state != NodeState::Dead);
+        self.cells.retain(|_, cell| {
+            if cell.adreno_tag || cell.salience >= 0.7 {
+                return cell.state != NodeState::Dead;
+            }
+            cell.energy > 0.1 && cell.state != NodeState::Dead
+        });
         if self.cells.len() != before {
             self.rebuild_index();
         }
@@ -1193,6 +1373,7 @@ impl ClusterField {
             self.emit(EventDelta::Dead(StateDelta { id }));
             self.purge_tracking_for(id);
         }
+        self.refresh_important_cells();
     }
 
     pub fn inject_seed_variation(&mut self, base_seed: &str) {
@@ -1618,11 +1799,13 @@ mod tests {
         field.record_token_hit("cpu", 1, 0.9, 110);
         field.now_ms = 400;
         field.record_token_hit("load", 2, 0.7, 90);
+        let mut filter = ViewFilter::default();
+        filter.min_strength = Some(0.8);
         let select = field
             .exec_lql(LqlAst::Select {
                 pattern: "cpu/load".into(),
-                min_strength: Some(0.8),
                 window_ms: Some(1_000),
+                filter,
             })
             .unwrap();
         match select.response.unwrap() {
@@ -1638,6 +1821,7 @@ mod tests {
                 pattern: "cpu".into(),
                 window_ms: Some(1_000),
                 every_ms: Some(500),
+                filter: ViewFilter::default(),
             })
             .unwrap();
         let view_id = match subscribe.response.unwrap() {
@@ -1785,6 +1969,49 @@ mod tests {
             "mirror impulse not observed in harmony event"
         );
     }
+
+    #[test]
+    fn noradrenaline_adjusts_and_resets() {
+        let mut field = ClusterField::new();
+        let id = field.add_root("liminal/norepi");
+        if let Some(cell) = field.cells.get_mut(&id) {
+            cell.mark_adreno();
+        }
+        field.now_ms = 1_000;
+        let logs = field.route_impulse(Impulse {
+            kind: ImpulseKind::Affect,
+            pattern: "affect/noradrenaline".into(),
+            strength: 0.8,
+            ttl_ms: 2_000,
+            tags: Vec::new(),
+        });
+        assert!(
+            logs.iter().any(|log| log.contains("HORMONE noradrenaline")),
+            "hormone activation not logged"
+        );
+        let cell = field.cells.get(&id).unwrap();
+        let boosted_affinity = field.affinity_scale_for(cell);
+        assert!(
+            boosted_affinity > field.harmony.affinity_scale,
+            "affinity scale should increase during hormone window"
+        );
+        let hormone = field
+            .noradrenaline_active()
+            .expect("hormone should be active");
+        let sleepy = (field.harmony.sleep_delta - 0.2 * hormone.strength).clamp(-0.4, 0.2);
+        assert!(
+            sleepy < field.harmony.sleep_delta,
+            "sleep threshold should decrease during hormone window"
+        );
+        let _ = field.tick_all(2_100);
+        let _cell = field.cells.get(&id).unwrap();
+        assert!(field.noradrenaline_active().is_none());
+        let restored = field.harmony.sleep_delta;
+        assert!(
+            (restored - field.harmony.sleep_delta).abs() < f32::EPSILON,
+            "sleep shift should return to baseline after hormone"
+        );
+    }
 }
 
 fn score_cell(cell: &NodeCell, imp: &Impulse, affinity_scale: f32) -> f32 {
@@ -1817,5 +2044,8 @@ fn snapshot_to_node(snapshot: &CellSnapshot) -> NodeCell {
     cell.last_response_ms = snapshot.last_response_ms;
     cell.energy = snapshot.energy;
     cell.state = snapshot.state;
+    cell.salience = snapshot.salience;
+    cell.adreno_tag = snapshot.adreno_tag;
+    cell.last_recall_ms = snapshot.last_recall_ms;
     cell
 }

@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -5,6 +7,7 @@ use tokio::time::{sleep, Duration};
 use crate::cluster_field::ClusterField;
 use crate::morph_mind::{analyze, hints as gather_hints};
 use crate::types::{Hint, Metrics};
+use serde_json::json;
 
 pub async fn run_loop<F, G, H>(
     field: Arc<Mutex<ClusterField>>,
@@ -22,16 +25,26 @@ pub async fn run_loop<F, G, H>(
     let on_hint = Arc::new(on_hint);
 
     let mut elapsed_since_metrics = 0u64;
+    let mut elapsed_since_partial = 0u64;
 
     loop {
         sleep(Duration::from_millis(tick_ms)).await;
         let mut guard = field.lock().await;
-        let events = guard.tick_all(tick_ms);
-        for event in events {
-            on_event(&event);
-        }
+        let mut events = guard.tick_all(tick_ms);
 
         elapsed_since_metrics += tick_ms;
+        elapsed_since_partial += tick_ms;
+        let mut partial_payload: Option<(Vec<u8>, usize, u64)> = None;
+        if elapsed_since_partial >= 5_000 {
+            elapsed_since_partial = 0;
+            let important = guard.important_cells().clone();
+            if !important.is_empty() {
+                let bytes = guard.partial_snapshot(&important);
+                let ts = guard.now_ms;
+                partial_payload = Some((bytes, important.len(), ts));
+            }
+        }
+
         if elapsed_since_metrics >= 1000 {
             let metrics = analyze(&guard);
             let observed = metrics.observed_load();
@@ -52,6 +65,50 @@ pub async fn run_loop<F, G, H>(
             apply_hints(&mut *guard, &mut tick_ms, &advice);
             on_metrics(&metrics);
             elapsed_since_metrics = 0;
+        }
+        let partial_payload = partial_payload;
+        drop(guard);
+        if let Some((bytes, count, ts)) = partial_payload {
+            let dir = Path::new("snap");
+            let mut log_line = None;
+            let mut json_line = None;
+            if let Err(err) = fs::create_dir_all(dir) {
+                events.push(format!("PARTIAL SNAPSHOT ERROR: create dir failed: {err}"));
+            } else {
+                let path = dir.join(format!("partial_{}.psnap", ts));
+                match fs::write(&path, &bytes) {
+                    Ok(()) => {
+                        let size_kb = (bytes.len() as f32) / 1024.0;
+                        log_line = Some(format!(
+                            "PARTIAL SNAPSHOT: cells={} size={:.1}KB",
+                            count, size_kb
+                        ));
+                        json_line = Some(
+                            json!({
+                                "ev": "snapshot",
+                                "meta": {"kind": "partial", "cells": count}
+                            })
+                            .to_string(),
+                        );
+                    }
+                    Err(err) => {
+                        events.push(format!(
+                            "PARTIAL SNAPSHOT ERROR: write {}: {}",
+                            path.display(),
+                            err
+                        ));
+                    }
+                }
+            }
+            if let Some(line) = log_line {
+                events.push(line);
+            }
+            if let Some(json_line) = json_line {
+                events.push(json_line);
+            }
+        }
+        for event in events {
+            on_event(&event);
         }
     }
 }
