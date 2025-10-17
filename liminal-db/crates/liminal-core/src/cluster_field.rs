@@ -56,6 +56,7 @@ pub struct ClusterField {
     reflex_engine: ReflexEngine,
     important_cells: HashSet<NodeId>,
     noradrenaline: Option<NoradrenalineEffect>,
+    pub resonant_model: ResonantModel,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,61 @@ struct NoradrenalineEffect {
     until_ms: u64,
     strength: f32,
 }
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct ResonantModel {
+    #[serde(default)]
+    pub edges: Vec<ResonantEdge>,
+    #[serde(default)]
+    pub influences: Vec<ResonantInfluence>,
+    #[serde(default)]
+    pub tensions: Vec<ResonantTension>,
+}
+
+impl ResonantModel {
+    pub fn top_edges(&self, limit: usize) -> Vec<ResonantEdge> {
+        take_top(&self.edges, limit)
+    }
+
+    pub fn top_influences(&self, limit: usize) -> Vec<ResonantInfluence> {
+        take_top(&self.influences, limit)
+    }
+
+    pub fn top_tensions(&self, limit: usize) -> Vec<ResonantTension> {
+        take_top(&self.tensions, limit)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantInfluence {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub impact: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantTension {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub tension: f32,
+}
+
+fn take_top<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    if limit == 0 {
+        Vec::new()
+    } else {
+        items.iter().take(limit).cloned().collect()
+    }
+}
+
+const DEFAULT_INTROSPECT_TOP_N: usize = 10;
 
 impl Default for HarmonyTuning {
     fn default() -> Self {
@@ -137,6 +193,7 @@ impl ClusterField {
             reflex_engine: ReflexEngine::new(2_000),
             important_cells: HashSet::new(),
             noradrenaline: None,
+            resonant_model: ResonantModel::default(),
         }
     }
 
@@ -482,6 +539,60 @@ impl ClusterField {
                 .to_string();
                 Ok(LqlExecResult {
                     response: Some(LqlResponse::Subscribe(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectModel { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let edges = self.resonant_model.top_edges(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_model": {
+                            "limit": limit,
+                            "edges": edges,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectInfluence { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let influences = self.resonant_model.top_influences(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_influence": {
+                            "limit": limit,
+                            "influences": influences,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectTension { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let tensions = self.resonant_model.top_tensions(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_tension": {
+                            "limit": limit,
+                            "tensions": tensions,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
                     events: vec![event],
                 })
             }
@@ -2052,6 +2163,94 @@ mod tests {
             assert!(report.protected > 0, "protected counter should increase");
             assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn introspect_model_emits_edges() {
+        let mut field = ClusterField::new();
+        field.resonant_model.edges = vec![
+            ResonantEdge {
+                from: 1,
+                to: 2,
+                weight: 0.92,
+            },
+            ResonantEdge {
+                from: 3,
+                to: 4,
+                weight: 0.75,
+            },
+        ];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectModel { top_n: Some(1) })
+            .expect("introspect model");
+        assert!(
+            exec.response.is_none(),
+            "introspect should not return response"
+        );
+        assert_eq!(exec.events.len(), 1, "expected single event");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        assert_eq!(payload["ev"], "lql");
+        let edges = payload["meta"]["introspect_model"]["edges"]
+            .as_array()
+            .expect("edges array");
+        assert_eq!(edges.len(), 1, "top_n should limit edges");
+        assert_eq!(edges[0]["from"].as_u64(), Some(1));
+        assert_eq!(
+            payload["meta"]["introspect_model"]["limit"].as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn introspect_influence_defaults_limit() {
+        let mut field = ClusterField::new();
+        field.resonant_model.influences = vec![ResonantInfluence {
+            source: 5,
+            target: 6,
+            impact: 0.66,
+        }];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectInfluence { top_n: None })
+            .expect("introspect influence");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        assert_eq!(payload["ev"], "lql");
+        assert_eq!(
+            payload["meta"]["introspect_influence"]["limit"].as_u64(),
+            Some(super::DEFAULT_INTROSPECT_TOP_N as u64)
+        );
+        let influences = payload["meta"]["introspect_influence"]["influences"]
+            .as_array()
+            .expect("influences array");
+        assert_eq!(influences.len(), 1);
+        assert_eq!(influences[0]["source"].as_u64(), Some(5));
+        assert_eq!(influences[0]["target"].as_u64(), Some(6));
+    }
+
+    #[test]
+    fn introspect_tension_truncates() {
+        let mut field = ClusterField::new();
+        field.resonant_model.tensions = vec![
+            ResonantTension {
+                from: 8,
+                to: 9,
+                tension: 0.55,
+            },
+            ResonantTension {
+                from: 10,
+                to: 11,
+                tension: 0.52,
+            },
+        ];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectTension { top_n: Some(2) })
+            .expect("introspect tension");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        let tensions = payload["meta"]["introspect_tension"]["tensions"]
+            .as_array()
+            .expect("tensions array");
+        assert_eq!(tensions.len(), 2);
+        assert_eq!(tensions[0]["from"].as_u64(), Some(8));
+        assert_eq!(tensions[1]["to"].as_u64(), Some(11));
     }
 
     #[test]

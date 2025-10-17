@@ -14,7 +14,9 @@ pub mod trs;
 pub mod types;
 pub mod views;
 
-pub use cluster_field::{ClusterField, FieldEvents};
+pub use cluster_field::{
+    ClusterField, FieldEvents, ResonantEdge, ResonantInfluence, ResonantModel, ResonantTension,
+};
 pub use dream_engine::{DreamConfig, DreamReport};
 pub use journal::{CellSnapshot, EventDelta, Journal};
 pub use life_loop::run_loop;
