@@ -98,6 +98,9 @@ fn snapshot_to_node(snapshot: &CellSnapshot) -> NodeCell {
     cell.last_response_ms = snapshot.last_response_ms;
     cell.energy = snapshot.energy;
     cell.state = snapshot.state;
+    cell.salience = snapshot.salience;
+    cell.adreno_tag = snapshot.adreno_tag;
+    cell.last_recall_ms = snapshot.last_recall_ms;
     cell
 }
 

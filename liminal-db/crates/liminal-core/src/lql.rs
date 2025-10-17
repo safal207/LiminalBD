@@ -2,19 +2,20 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::views::ViewStats;
+use crate::views::{ViewFilter, ViewStats};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LqlAst {
     Select {
         pattern: String,
-        min_strength: Option<f32>,
         window_ms: Option<u32>,
+        filter: ViewFilter,
     },
     Subscribe {
         pattern: String,
         window_ms: Option<u32>,
         every_ms: Option<u32>,
+        filter: ViewFilter,
     },
     Unsubscribe {
         id: u64,
@@ -48,6 +49,10 @@ pub struct LqlSelectResult {
     pub window_ms: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_strength: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_salience: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adreno: Option<bool>,
     pub stats: ViewStats,
 }
 
@@ -57,6 +62,12 @@ pub struct LqlSubscribeResult {
     pub pattern: String,
     pub window_ms: u32,
     pub every_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_strength: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_salience: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adreno: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -99,6 +110,81 @@ pub fn parse_lql(input: &str) -> Result<LqlAst, LqlError> {
     }
 }
 
+fn parse_where_conditions<'a>(
+    tokens: &[&'a str],
+    filter: &mut ViewFilter,
+) -> Result<usize, LqlError> {
+    if tokens.is_empty() {
+        return Err(LqlError::new("WHERE requires a condition"));
+    }
+    let mut consumed = 0usize;
+    let mut expect_condition = true;
+    while consumed < tokens.len() {
+        let token = tokens[consumed];
+        let upper = token.to_uppercase();
+        if upper == "WINDOW" || upper == "EVERY" {
+            break;
+        }
+        if !expect_condition {
+            if upper == "AND" {
+                consumed += 1;
+                expect_condition = true;
+                continue;
+            }
+            return Err(LqlError::new("expected AND between WHERE clauses"));
+        }
+        parse_condition_token(token, filter)?;
+        consumed += 1;
+        expect_condition = false;
+    }
+    if consumed == 0 {
+        return Err(LqlError::new("WHERE requires a condition"));
+    }
+    if expect_condition {
+        return Err(LqlError::new("WHERE requires a condition"));
+    }
+    Ok(consumed)
+}
+
+fn parse_condition_token(token: &str, filter: &mut ViewFilter) -> Result<(), LqlError> {
+    if let Some(value) = token.strip_prefix("strength>=") {
+        let strength: f32 = value
+            .parse()
+            .map_err(|_| LqlError::new("invalid strength threshold"))?;
+        if !(0.0..=1.0).contains(&strength) {
+            return Err(LqlError::new("strength must be within 0.0..=1.0"));
+        }
+        filter.min_strength = Some(strength);
+        return Ok(());
+    }
+    if let Some(value) = token.strip_prefix("salience>=") {
+        let salience: f32 = value
+            .parse()
+            .map_err(|_| LqlError::new("invalid salience threshold"))?;
+        if !(0.0..=1.0).contains(&salience) {
+            return Err(LqlError::new("salience must be within 0.0..=1.0"));
+        }
+        filter.min_salience = Some(salience);
+        return Ok(());
+    }
+    if let Some(value) = token.strip_prefix("adreno=") {
+        match value.to_lowercase().as_str() {
+            "true" => {
+                filter.adreno = Some(true);
+                return Ok(());
+            }
+            "false" => {
+                filter.adreno = Some(false);
+                return Ok(());
+            }
+            _ => {
+                return Err(LqlError::new("adreno must be true or false"));
+            }
+        }
+    }
+    Err(LqlError::new("unsupported WHERE clause"))
+}
+
 fn parse_select<'a, I>(parts: &mut I) -> Result<LqlAst, LqlError>
 where
     I: Iterator<Item = &'a str>,
@@ -106,29 +192,16 @@ where
     let pattern = parts
         .next()
         .ok_or_else(|| LqlError::new("SELECT requires a pattern"))?;
-    let mut min_strength = None;
     let mut window_ms = None;
+    let mut filter = ViewFilter::default();
     let rest: Vec<&str> = parts.collect();
     let mut i = 0;
     while i < rest.len() {
         match rest[i].to_uppercase().as_str() {
             "WHERE" => {
                 i += 1;
-                if i >= rest.len() {
-                    return Err(LqlError::new("WHERE requires a condition"));
-                }
-                let condition = rest[i].trim();
-                if let Some(value) = condition.strip_prefix("strength>=") {
-                    let strength: f32 = value
-                        .parse()
-                        .map_err(|_| LqlError::new("invalid strength threshold"))?;
-                    if !(0.0..=1.0).contains(&strength) {
-                        return Err(LqlError::new("strength must be within 0.0..=1.0"));
-                    }
-                    min_strength = Some(strength);
-                } else {
-                    return Err(LqlError::new("unsupported WHERE clause"));
-                }
+                let consumed = parse_where_conditions(&rest[i..], &mut filter)?;
+                i += consumed;
             }
             "WINDOW" => {
                 i += 1;
@@ -142,6 +215,8 @@ where
                     return Err(LqlError::new("WINDOW must be greater than zero"));
                 }
                 window_ms = Some(value);
+                i += 1;
+                continue;
             }
             other => {
                 return Err(LqlError::new(format!(
@@ -150,12 +225,11 @@ where
                 )));
             }
         }
-        i += 1;
     }
     Ok(LqlAst::Select {
         pattern: pattern.to_string(),
-        min_strength,
         window_ms,
+        filter,
     })
 }
 
@@ -168,10 +242,16 @@ where
         .ok_or_else(|| LqlError::new("SUBSCRIBE requires a pattern"))?;
     let mut window_ms = None;
     let mut every_ms = None;
+    let mut filter = ViewFilter::default();
     let rest: Vec<&str> = parts.collect();
     let mut i = 0;
     while i < rest.len() {
         match rest[i].to_uppercase().as_str() {
+            "WHERE" => {
+                i += 1;
+                let consumed = parse_where_conditions(&rest[i..], &mut filter)?;
+                i += consumed;
+            }
             "WINDOW" => {
                 i += 1;
                 if i >= rest.len() {
@@ -184,6 +264,8 @@ where
                     return Err(LqlError::new("WINDOW must be greater than zero"));
                 }
                 window_ms = Some(value);
+                i += 1;
+                continue;
             }
             "EVERY" => {
                 i += 1;
@@ -197,6 +279,8 @@ where
                     return Err(LqlError::new("EVERY must be greater than zero"));
                 }
                 every_ms = Some(value);
+                i += 1;
+                continue;
             }
             other => {
                 return Err(LqlError::new(format!(
@@ -205,12 +289,12 @@ where
                 )));
             }
         }
-        i += 1;
     }
     Ok(LqlAst::Subscribe {
         pattern: pattern.to_string(),
         window_ms,
         every_ms,
+        filter,
     })
 }
 
@@ -241,8 +325,8 @@ mod tests {
             ast,
             LqlAst::Select {
                 pattern: "cpu/load".into(),
-                min_strength: None,
                 window_ms: Some(1500),
+                filter: ViewFilter::default(),
             }
         );
     }
@@ -250,12 +334,14 @@ mod tests {
     #[test]
     fn parse_select_with_where() {
         let ast = parse_lql("SELECT cpu/load WHERE strength>=0.7 WINDOW 1200").unwrap();
+        let mut filter = ViewFilter::default();
+        filter.min_strength = Some(0.7);
         assert_eq!(
             ast,
             LqlAst::Select {
                 pattern: "cpu/load".into(),
-                min_strength: Some(0.7),
                 window_ms: Some(1200),
+                filter,
             }
         );
     }
@@ -269,6 +355,7 @@ mod tests {
                 pattern: "mem/free".into(),
                 window_ms: Some(2000),
                 every_ms: Some(1000),
+                filter: ViewFilter::default(),
             }
         );
     }
@@ -289,5 +376,44 @@ mod tests {
     fn reject_unknown_command() {
         let err = parse_lql("FOO bar").unwrap_err();
         assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn parse_select_with_extended_filters() {
+        let ast = parse_lql("SELECT cpu/load WHERE salience>=0.7 AND adreno=true WINDOW 5000")
+            .expect("parse select");
+        match ast {
+            LqlAst::Select {
+                pattern,
+                window_ms,
+                filter,
+            } => {
+                assert_eq!(pattern, "cpu/load");
+                assert_eq!(window_ms, Some(5_000));
+                assert_eq!(filter.min_salience, Some(0.7));
+                assert_eq!(filter.adreno, Some(true));
+            }
+            _ => panic!("unexpected AST variant"),
+        }
+    }
+
+    #[test]
+    fn parse_subscribe_with_adreno_filter() {
+        let ast = parse_lql("SUBSCRIBE * WHERE adreno=false WINDOW 1000 EVERY 5000")
+            .expect("parse subscribe");
+        match ast {
+            LqlAst::Subscribe {
+                pattern,
+                window_ms,
+                every_ms,
+                filter,
+            } => {
+                assert_eq!(pattern, "*");
+                assert_eq!(window_ms, Some(1_000));
+                assert_eq!(every_ms, Some(5_000));
+                assert_eq!(filter.adreno, Some(false));
+            }
+            _ => panic!("unexpected AST variant"),
+        }
     }
 }

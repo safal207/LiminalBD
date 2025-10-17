@@ -99,6 +99,8 @@ Hex-дампы приведены в формате без пробелов и �
 q <pattern> [strength]  # создать Query-импульс
 w <pattern> [strength]  # создать Write-импульс
 a <pattern> [strength]  # создать Affect-импульс
+:affect noradrenaline <strength> <ttl_ms>
+                        # ввести гормональный импульс (strength 0..1, TTL в мс)
 :reflex add <json>      # добавить правило рефлекса
 :reflex list            # вывести список правил
 :reflex rm <id>         # удалить правило по идентификатору
@@ -108,13 +110,17 @@ a <pattern> [strength]  # создать Affect-импульс
 :harmony                # вывести состояние Symmetry Loop
 ```
 
+Команда `:affect noradrenaline` публикует импульс `affect/noradrenaline` с заданной силой и окном действия. На протяжении TTL узлы,
+помеченные `adreno`-тэгом, получают повышенную чувствительность (affinity scale) и пониженный порог сна; по истечении окна ядро
+возвращает параметры к базовым значениям и сигнализирует событием `ASTRO TAG off` в логах.
+
 ### LQL и Views
 
 В версии v0.6 добавлен лёгкий язык запросов LQL. Команды вводятся через `lql ...`:
 
 ```
-SELECT <pattern> [WHERE strength>=<f32>] [WINDOW <ms>]
-SUBSCRIBE <pattern> [WINDOW <ms>] [EVERY <ms>]
+SELECT <pattern> [WHERE strength>=<f32> | salience>=<f32> | adreno=true|false [AND ...]] [WINDOW <ms>]
+SUBSCRIBE <pattern> [WHERE strength>=<f32> | salience>=<f32> | adreno=true|false] [WINDOW <ms>] [EVERY <ms>]
 UNSUBSCRIBE <view_id>
 ```
 
@@ -125,8 +131,8 @@ UNSUBSCRIBE <view_id>
 Примеры CLI:
 
 ```
-lql SELECT cpu/load WINDOW 1000
-lql SUBSCRIBE temp/device WINDOW 3000 EVERY 1000
+lql SELECT cpu/load WHERE salience>=0.7 WINDOW 10000
+lql SUBSCRIBE * WHERE adreno=true WINDOW 60000 EVERY 5000
 ```
 
 В `--pipe-cbor` режиме запросы передаются как команды:
@@ -142,7 +148,11 @@ lql SUBSCRIBE temp/device WINDOW 3000 EVERY 1000
 {"ev":"lql","meta":{"subscribe":{...}}}
 {"ev":"lql","meta":{"unsubscribe":{...}}}
 {"ev":"view","meta":{"id":<u64>,"pattern":<text>,"window":<u32>,"every":<u32>,"stats":{...}}}
+{"ev":"snapshot","meta":{"kind":"partial","cells":<u32>}}
 ```
+
+Событие `snapshot(kind=partial)` появляется, когда ядро фиксирует важные (высокая `salience` и недавний `recall`) клетки и сохраняет
+их состояние в файл `snap/partial_<ts>.psnap`.
 
 `stats` содержит:
 
@@ -151,7 +161,8 @@ lql SUBSCRIBE temp/device WINDOW 3000 EVERY 1000
   "count": <u32>,
   "avg_strength": <f32>,
   "avg_latency": <f32>,
-  "top_nodes": [ {"id": <u64>, "hits": <u32>}, ... ]
+  "top_nodes": [ {"id": <u64>, "hits": <u32>}, ... ],
+  "emotional_load": <f32>   // доля попаданий по adreno-тегированным узлам
 }
 ```
 

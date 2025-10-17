@@ -384,6 +384,53 @@ async fn run_interactive(
                         )
                         .await;
                     }
+                    command if command.starts_with("affect") => {
+                        let args = command.trim_start_matches("affect").trim();
+                        let mut parts = args.split_whitespace();
+                        match parts.next() {
+                            Some(hormone) if hormone.eq_ignore_ascii_case("noradrenaline") => {
+                                let Some(strength_str) = parts.next() else {
+                                    eprintln!(
+                                        "usage: :affect noradrenaline <strength 0..1> <ttl_ms>"
+                                    );
+                                    continue;
+                                };
+                                let Some(ttl_str) = parts.next() else {
+                                    eprintln!(
+                                        "usage: :affect noradrenaline <strength 0..1> <ttl_ms>"
+                                    );
+                                    continue;
+                                };
+                                let strength =
+                                    strength_str.parse::<f32>().map(|v| v.clamp(0.0, 1.0));
+                                let ttl_ms = ttl_str.parse::<u64>();
+                                match (strength, ttl_ms) {
+                                    (Ok(strength), Ok(ttl_ms)) => {
+                                        let impulse = Impulse {
+                                            kind: ImpulseKind::Affect,
+                                            pattern: "affect/noradrenaline".into(),
+                                            strength,
+                                            ttl_ms,
+                                            tags: vec!["cli".into(), "hormone".into()],
+                                        };
+                                        if tx_cli.send(impulse).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    _ => {
+                                        eprintln!(
+                                            "usage: :affect noradrenaline <strength 0..1> <ttl_ms>"
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                eprintln!(
+                                    "unknown :affect command; expected 'noradrenaline <strength> <ttl_ms>'"
+                                );
+                            }
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -1027,20 +1074,53 @@ fn format_top_nodes_json(items: &[JsonValue]) -> String {
 fn print_lql_response(response: &LqlResponse) {
     match response {
         LqlResponse::Select(result) => {
-            let (count, avg_strength, avg_latency, top) = format_stats_output(&result.stats);
+            let (count, avg_strength, avg_latency, emotional, top) =
+                format_stats_output(&result.stats);
             let threshold = result
                 .min_strength
                 .map(|v| format!("{v:.2}"))
                 .unwrap_or_else(|| "-".into());
+            let salience = result
+                .min_salience
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            let adreno = result
+                .adreno
+                .map(|v| if v { "true" } else { "false" }.to_string())
+                .unwrap_or_else(|| "-".into());
             println!(
-                "LQL SELECT pattern={} window={}ms min>={} count={} avg_str={:.2} avg_lat={:.1} top=[{}]",
-                result.pattern, result.window_ms, threshold, count, avg_strength, avg_latency, top
+                "LQL SELECT pattern={} window={}ms min>={} sal>={} adreno={} count={} avg_str={:.2} avg_lat={:.1} emo_load={:.2} top=[{}]",
+                result.pattern,
+                result.window_ms,
+                threshold,
+                salience,
+                adreno,
+                count,
+                avg_strength,
+                avg_latency,
+                emotional,
+                top
             );
         }
         LqlResponse::Subscribe(result) => {
             println!(
-                "LQL SUBSCRIBE id={} pattern={} window={}ms every={}ms",
-                result.id, result.pattern, result.window_ms, result.every_ms
+                "LQL SUBSCRIBE id={} pattern={} window={}ms every={}ms min>={} sal>={} adreno={}",
+                result.id,
+                result.pattern,
+                result.window_ms,
+                result.every_ms,
+                result
+                    .min_strength
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "-".into()),
+                result
+                    .min_salience
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "-".into()),
+                result
+                    .adreno
+                    .map(|v| if v { "true" } else { "false" }.to_string())
+                    .unwrap_or_else(|| "-".into())
             );
         }
         LqlResponse::Unsubscribe(result) => {
@@ -1052,10 +1132,11 @@ fn print_lql_response(response: &LqlResponse) {
     }
 }
 
-fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, String) {
+fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, f64, String) {
     let count = stats.count;
     let avg_strength = stats.avg_strength as f64;
     let avg_latency = stats.avg_latency as f64;
+    let emotional = stats.emotional_load as f64;
     let top = if stats.top_nodes.is_empty() {
         "-".into()
     } else {
@@ -1066,7 +1147,7 @@ fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, String) {
             .collect::<Vec<_>>()
             .join(",")
     };
-    (count, avg_strength, avg_latency, top)
+    (count, avg_strength, avg_latency, emotional, top)
 }
 
 fn render_harmony_snapshot_line(snapshot: &HarmonySnapshot) -> String {

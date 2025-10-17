@@ -17,6 +17,9 @@ pub struct NodeCell {
     pub affinity: f32,
     pub last_response_ms: u64,
     pub energy: f32,
+    pub salience: f32,
+    pub adreno_tag: bool,
+    pub last_recall_ms: u64,
 }
 
 impl NodeCell {
@@ -29,30 +32,54 @@ impl NodeCell {
             links: HashSet::new(),
             last_response_ms: 0,
             energy: 0.6,
+            salience: 0.0,
+            adreno_tag: false,
+            last_recall_ms: 0,
             seed,
         }
     }
 
-    pub fn ingest(&mut self, imp: &Impulse) -> Option<String> {
+    pub fn bump_salience(&mut self, by: f32) {
+        self.salience = (self.salience + by).clamp(0.0, 1.0);
+    }
+
+    pub fn mark_adreno(&mut self) {
+        self.adreno_tag = true;
+    }
+
+    pub fn ingest(&mut self, imp: &Impulse, now_ms: u64) -> Option<String> {
         if self.state == NodeState::Dead {
             return None;
         }
 
-        if !pattern_match(
+        let Some(match_score) = pattern_match(
             self.affinity,
             &self.seed.core_pattern,
             &imp.pattern,
             imp.strength,
             &imp.tags,
-        ) {
+        ) else {
             self.energy = (self.energy - 0.01).clamp(0.0, 1.0);
             return None;
+        };
+
+        if imp.kind == ImpulseKind::Affect
+            && imp.pattern.starts_with("affect/")
+            && match_score >= 0.6
+        {
+            self.bump_salience(0.15 * imp.strength);
         }
 
         let (delta, response) = match imp.kind {
             ImpulseKind::Query => {
                 if self.state == NodeState::Sleep && imp.strength > 0.6 {
                     self.state = NodeState::Idle;
+                }
+                if match_score >= 0.6 {
+                    self.last_recall_ms = now_ms;
+                    if self.adreno_tag {
+                        self.bump_salience(0.05);
+                    }
                 }
                 (
                     -0.05 * imp.strength,
@@ -124,6 +151,9 @@ impl NodeCell {
             affinity: child_affinity,
             last_response_ms: self.last_response_ms,
             energy: 0.45,
+            salience: (self.salience * 0.5).clamp(0.0, 1.0),
+            adreno_tag: self.adreno_tag,
+            last_recall_ms: self.last_recall_ms,
         };
         child.seed.affinity = child_affinity;
         Some(child)
@@ -153,7 +183,13 @@ impl NodeCell {
     }
 }
 
-fn pattern_match(affinity: f32, core: &str, pattern: &str, strength: f32, tags: &[String]) -> bool {
+fn pattern_match(
+    affinity: f32,
+    core: &str,
+    pattern: &str,
+    strength: f32,
+    tags: &[String],
+) -> Option<f32> {
     let core_tokens = tokenize(core);
     let mut pattern_tokens = tokenize(pattern);
     if pattern_tokens.is_empty() {
@@ -165,10 +201,14 @@ fn pattern_match(affinity: f32, core: &str, pattern: &str, strength: f32, tags: 
         .iter()
         .any(|token| core_tokens.iter().any(|core| core == token))
     {
-        return true;
+        return Some(1.0);
     }
     let closeness = 1.0 - (affinity - strength).abs();
-    closeness > 0.45
+    if closeness > 0.45 {
+        Some(closeness)
+    } else {
+        None
+    }
 }
 
 fn tokenize(input: &str) -> Vec<String> {
@@ -177,4 +217,49 @@ fn tokenize(input: &str) -> Vec<String> {
         .filter(|t| !t.is_empty())
         .map(|t| t.to_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_params(pattern: &str, affinity: f32) -> SeedParams {
+        SeedParams {
+            affinity,
+            base_metabolism: 0.4,
+            core_pattern: pattern.into(),
+        }
+    }
+
+    #[test]
+    fn affect_impulse_raises_salience() {
+        let mut cell = NodeCell::from_seed(1, seed_params("affect/demo", 0.7));
+        let impulse = Impulse {
+            kind: ImpulseKind::Affect,
+            pattern: "affect/demo".into(),
+            strength: 0.9,
+            ttl_ms: 1_000,
+            tags: Vec::new(),
+        };
+        assert_eq!(cell.salience, 0.0);
+        cell.ingest(&impulse, 10);
+        assert!(cell.salience > 0.0);
+    }
+
+    #[test]
+    fn query_recall_updates_salience_for_tagged_cells() {
+        let mut cell = NodeCell::from_seed(2, seed_params("query/topic", 0.65));
+        cell.mark_adreno();
+        cell.salience = 0.4;
+        let impulse = Impulse {
+            kind: ImpulseKind::Query,
+            pattern: "query/topic".into(),
+            strength: 0.8,
+            ttl_ms: 1_000,
+            tags: Vec::new(),
+        };
+        cell.ingest(&impulse, 5_000);
+        assert_eq!(cell.last_recall_ms, 5_000);
+        assert!(cell.salience > 0.4);
+    }
 }

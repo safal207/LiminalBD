@@ -64,6 +64,12 @@ pub struct CellSnapshot {
     pub affinity: f32,
     pub last_response_ms: u64,
     pub energy: f32,
+    #[serde(default)]
+    pub salience: f32,
+    #[serde(default)]
+    pub adreno_tag: bool,
+    #[serde(default)]
+    pub last_recall_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +139,9 @@ impl From<&crate::node_cell::NodeCell> for CellSnapshot {
             affinity: cell.affinity,
             last_response_ms: cell.last_response_ms,
             energy: cell.energy,
+            salience: cell.salience,
+            adreno_tag: cell.adreno_tag,
+            last_recall_ms: cell.last_recall_ms,
         }
     }
 }

@@ -6,6 +6,26 @@ use crate::types::NodeId;
 
 pub type ViewId = u64;
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ViewFilter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_strength: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_salience: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adreno: Option<bool>,
+}
+
+impl Default for ViewFilter {
+    fn default() -> Self {
+        ViewFilter {
+            min_strength: None,
+            min_salience: None,
+            adreno: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NodeHitStat {
     pub id: NodeId,
@@ -18,6 +38,7 @@ pub struct ViewStats {
     pub avg_strength: f32,
     pub avg_latency: f32,
     pub top_nodes: Vec<NodeHitStat>,
+    pub emotional_load: f32,
 }
 
 impl Default for ViewStats {
@@ -27,6 +48,7 @@ impl Default for ViewStats {
             avg_strength: 0.0,
             avg_latency: 0.0,
             top_nodes: Vec::new(),
+            emotional_load: 0.0,
         }
     }
 }
@@ -38,6 +60,7 @@ pub struct View {
     pub window_ms: u32,
     pub every_ms: u32,
     pub last_emit: u64,
+    pub filter: ViewFilter,
 }
 
 impl View {
@@ -66,6 +89,7 @@ impl ViewRegistry {
         window_ms: u32,
         every_ms: u32,
         now_ms: u64,
+        filter: ViewFilter,
     ) -> ViewId {
         let id = self.next_id;
         self.next_id += 1;
@@ -76,6 +100,7 @@ impl ViewRegistry {
             window_ms,
             every_ms,
             last_emit,
+            filter,
         };
         self.views.insert(id, view);
         id
@@ -104,6 +129,7 @@ impl ViewRegistry {
                 "pattern": view.pattern,
                 "window": view.window_ms,
                 "every": view.every_ms,
+                "filter": &view.filter,
                 "stats": stats,
             }
         })
@@ -125,7 +151,7 @@ mod tests {
     fn view_tick_emits_when_due() {
         let mut registry = ViewRegistry::new();
         let now = 1_000u64;
-        let id = registry.add_view("cpu".into(), 1_000, 500, now);
+        let id = registry.add_view("cpu".into(), 1_000, 500, now, ViewFilter::default());
         assert_eq!(id, 1);
         let due = registry.take_due(now + 500);
         assert_eq!(due.len(), 1);
@@ -134,6 +160,7 @@ mod tests {
             avg_strength: 0.5,
             avg_latency: 100.0,
             top_nodes: vec![NodeHitStat { id: 1, hits: 3 }],
+            emotional_load: 0.5,
         };
         let event = ViewRegistry::build_event(&due[0], &stats);
         assert!(event.contains("\"ev\":\"view\""));
