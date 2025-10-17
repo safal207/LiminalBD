@@ -1,3 +1,4 @@
+pub mod awakening;
 pub mod cluster_field;
 pub mod dream_engine;
 pub mod journal;
@@ -14,9 +15,15 @@ pub mod trs;
 pub mod types;
 pub mod views;
 
+pub use awakening::{
+    AwakeningConfig, ModelFrame, ResonantModel, SyncAction, SyncEntry, SyncLog,
+    RESONANT_SNAPSHOT_LIMIT, SYNCLOG_SNAPSHOT_LIMIT,
+};
 pub use cluster_field::{ClusterField, FieldEvents};
 pub use dream_engine::{DreamConfig, DreamReport};
-pub use journal::{CellSnapshot, EventDelta, Journal};
+pub use journal::{
+    AwakenApplyDelta, AwakenTickDelta, CellSnapshot, EventDelta, Journal, ModelBuildDelta,
+};
 pub use life_loop::run_loop;
 pub use lql::{
     parse_lql, LqlAst, LqlError, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult,

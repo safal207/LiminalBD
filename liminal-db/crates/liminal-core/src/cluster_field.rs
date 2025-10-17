@@ -2,15 +2,18 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use blake3::Hasher;
 use rand::Rng;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::awakening::{AwakeningConfig, ModelFrame, ResonantModel, SyncLog};
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
-    AffinityDelta, CellSnapshot, CollectiveDreamReportDelta, DivideDelta, DreamEdgeDelta,
-    DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta, Journal, LinkDelta, StateDelta,
-    SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
+    AffinityDelta, AwakenApplyDelta, AwakenTickDelta, CellSnapshot, CollectiveDreamReportDelta,
+    DivideDelta, DreamEdgeDelta, DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta,
+    Journal, LinkDelta, ModelBuildDelta, StateDelta, SyncAlignDelta, SyncShareDelta, TickDelta,
+    TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
     LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
@@ -49,6 +52,10 @@ pub struct ClusterField {
     sync_cfg: SyncConfig,
     sync_reports: VecDeque<(u64, SyncReport)>,
     pub trs: TrsState,
+    awakening_cfg: AwakeningConfig,
+    resonant_model: ResonantModel,
+    sync_log: SyncLog,
+    last_awaken_tick: u64,
     harmony: HarmonyTuning,
     pub views: ViewRegistry,
     next_hit_seq: u64,
@@ -130,6 +137,10 @@ impl ClusterField {
             sync_cfg: SyncConfig::default(),
             sync_reports: VecDeque::new(),
             trs: TrsState::default(),
+            awakening_cfg: AwakeningConfig::default(),
+            resonant_model: ResonantModel::default(),
+            sync_log: SyncLog::default(),
+            last_awaken_tick: 0,
             harmony: HarmonyTuning::default(),
             views: ViewRegistry::new(),
             next_hit_seq: 1,
@@ -185,6 +196,107 @@ impl ClusterField {
         cfg.weight_xfer = cfg.weight_xfer.clamp(0.05, 0.5);
         self.sync_cfg = cfg.clone();
         self.emit(EventDelta::SyncConfig(cfg));
+    }
+
+    pub fn awakening_config(&self) -> AwakeningConfig {
+        self.awakening_cfg.clone()
+    }
+
+    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
+        self.awakening_cfg = cfg;
+    }
+
+    pub fn resonant_model(&self) -> &ResonantModel {
+        &self.resonant_model
+    }
+
+    pub fn sync_log(&self) -> &SyncLog {
+        &self.sync_log
+    }
+
+    pub fn last_awaken_tick(&self) -> u64 {
+        self.last_awaken_tick
+    }
+
+    pub fn restore_awakening_state(
+        &mut self,
+        cfg: AwakeningConfig,
+        model: ResonantModel,
+        sync_log: SyncLog,
+        last_tick: u64,
+    ) {
+        self.awakening_cfg = cfg;
+        self.resonant_model = model;
+        self.sync_log = sync_log;
+        self.last_awaken_tick = last_tick;
+    }
+
+    pub fn build_resonant_model(&mut self) -> String {
+        let mut hasher = Hasher::new();
+        let mut ids: Vec<NodeId> = self.cells.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(cell) = self.cells.get(&id) {
+                let data = format!(
+                    "{}|{}|{:?}|{:.3}|{:.3}|{:.3}|{}",
+                    cell.id,
+                    cell.seed.core_pattern,
+                    cell.state,
+                    cell.affinity,
+                    cell.metabolism,
+                    cell.energy,
+                    cell.links.len()
+                );
+                hasher.update(data.as_bytes());
+            }
+        }
+        hasher.update(&self.now_ms.to_le_bytes());
+        hasher.update(&(self.cells.len() as u64).to_le_bytes());
+        let hash = hasher.finalize().to_hex().to_string();
+        let cell_count = self.cells.len().min(u32::MAX as usize) as u32;
+        let frame = ModelFrame {
+            hash: hash.clone(),
+            cell_count,
+            created_ms: self.now_ms,
+        };
+        self.resonant_model.record_build(frame.clone());
+        self.sync_log
+            .record_build(frame.hash.clone(), frame.created_ms, frame.cell_count);
+        let delta = EventDelta::ModelBuild(ModelBuildDelta {
+            hash: frame.hash.clone(),
+            cell_count: frame.cell_count,
+            now_ms: frame.created_ms,
+        });
+        self.emit(delta);
+        hash
+    }
+
+    pub fn apply_awakening_model(&mut self) {
+        let hash = self.resonant_model.last_hash().map(|h| h.to_string());
+        let cell_count = self.cells.len().min(u32::MAX as usize) as u32;
+        if let Some(hash_value) = &hash {
+            self.sync_log
+                .record_apply(hash_value.clone(), self.now_ms, cell_count);
+        }
+        self.resonant_model.set_last_applied(hash.clone());
+        let delta = EventDelta::AwakenApply(AwakenApplyDelta {
+            hash,
+            config: self.awakening_cfg.clone(),
+            now_ms: self.now_ms,
+            cell_count,
+        });
+        self.emit(delta);
+    }
+
+    pub fn awaken_tick(&mut self) {
+        self.last_awaken_tick = self.now_ms;
+        self.sync_log.record_tick(self.now_ms);
+        let hash = self.resonant_model.last_applied().map(|h| h.to_string());
+        let delta = EventDelta::AwakenTick(AwakenTickDelta {
+            hash,
+            now_ms: self.now_ms,
+        });
+        self.emit(delta);
     }
 
     pub fn last_sync_reports(&self, count: usize) -> Vec<(u64, SyncReport)> {
@@ -1562,6 +1674,7 @@ impl ClusterField {
             });
             events.push(event.to_string());
         }
+        self.awaken_tick();
         events
     }
 
@@ -1811,6 +1924,33 @@ impl ClusterField {
                     .push_back((delta.now_ms, delta.report.clone()));
                 while self.sync_reports.len() > 16 {
                     self.sync_reports.pop_front();
+                }
+            }
+            EventDelta::ModelBuild(delta) => {
+                let frame = ModelFrame {
+                    hash: delta.hash.clone(),
+                    cell_count: delta.cell_count,
+                    created_ms: delta.now_ms,
+                };
+                self.resonant_model.record_build(frame.clone());
+                self.sync_log
+                    .record_build(frame.hash.clone(), frame.created_ms, frame.cell_count);
+            }
+            EventDelta::AwakenApply(delta) => {
+                self.awakening_cfg = delta.config.clone();
+                self.resonant_model.set_last_applied(delta.hash.clone());
+                if let Some(hash) = &delta.hash {
+                    self.sync_log
+                        .record_apply(hash.clone(), delta.now_ms, delta.cell_count);
+                }
+            }
+            EventDelta::AwakenTick(delta) => {
+                self.last_awaken_tick = delta.now_ms;
+                self.sync_log.record_tick(delta.now_ms);
+                if let Some(hash) = &delta.hash {
+                    if self.resonant_model.last_applied().is_none() {
+                        self.resonant_model.set_last_applied(Some(hash.clone()));
+                    }
                 }
             }
         }
