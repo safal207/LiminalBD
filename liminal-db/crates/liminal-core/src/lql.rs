@@ -20,6 +20,15 @@ pub enum LqlAst {
     Unsubscribe {
         id: u64,
     },
+    IntrospectModel {
+        top_n: Option<usize>,
+    },
+    IntrospectInfluence {
+        top_n: Option<usize>,
+    },
+    IntrospectTension {
+        top_n: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,8 +115,54 @@ pub fn parse_lql(input: &str) -> Result<LqlAst, LqlError> {
         "SELECT" => parse_select(&mut parts),
         "SUBSCRIBE" => parse_subscribe(&mut parts),
         "UNSUBSCRIBE" => parse_unsubscribe(&mut parts),
+        "INTROSPECT" => parse_introspect(&mut parts),
         other => Err(LqlError::new(format!("unknown LQL command: {}", other))),
     }
+}
+
+fn parse_introspect<'a, I>(parts: &mut I) -> Result<LqlAst, LqlError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let target = parts
+        .next()
+        .ok_or_else(|| LqlError::new("INTROSPECT requires a target"))?;
+    let rest: Vec<&str> = parts.collect();
+    let top_n = parse_top_clause(&rest)?;
+    match target.to_uppercase().as_str() {
+        "MODEL" => Ok(LqlAst::IntrospectModel { top_n }),
+        "INFLUENCE" => Ok(LqlAst::IntrospectInfluence { top_n }),
+        "TENSION" => Ok(LqlAst::IntrospectTension { top_n }),
+        other => Err(LqlError::new(format!(
+            "unexpected INTROSPECT target: {}",
+            other
+        ))),
+    }
+}
+
+fn parse_top_clause(tokens: &[&str]) -> Result<Option<usize>, LqlError> {
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    if !tokens[0].eq_ignore_ascii_case("TOP") {
+        return Err(LqlError::new(format!(
+            "unexpected token in INTROSPECT: {}",
+            tokens[0]
+        )));
+    }
+    if tokens.len() < 2 {
+        return Err(LqlError::new("TOP requires a numeric value"));
+    }
+    if tokens.len() > 2 {
+        return Err(LqlError::new("unexpected tokens after TOP clause"));
+    }
+    let value: usize = tokens[1]
+        .parse()
+        .map_err(|_| LqlError::new("TOP requires a positive integer"))?;
+    if value == 0 {
+        return Err(LqlError::new("TOP must be greater than zero"));
+    }
+    Ok(Some(value))
 }
 
 fn parse_where_conditions<'a>(
@@ -415,5 +470,29 @@ mod tests {
             }
             _ => panic!("unexpected AST variant"),
         }
+    }
+
+    #[test]
+    fn parse_introspect_model_without_top() {
+        let ast = parse_lql("INTROSPECT model").expect("parse introspect");
+        assert_eq!(ast, LqlAst::IntrospectModel { top_n: None });
+    }
+
+    #[test]
+    fn parse_introspect_influence_with_top() {
+        let ast = parse_lql("INTROSPECT influence TOP 7").expect("parse introspect");
+        assert_eq!(ast, LqlAst::IntrospectInfluence { top_n: Some(7) });
+    }
+
+    #[test]
+    fn parse_introspect_rejects_invalid_top() {
+        let err = parse_lql("INTROSPECT model TOP 0").unwrap_err();
+        assert!(err.to_string().contains("TOP"));
+    }
+
+    #[test]
+    fn parse_introspect_rejects_unknown_target() {
+        let err = parse_lql("INTROSPECT foo").unwrap_err();
+        assert!(err.to_string().contains("unexpected"));
     }
 }
