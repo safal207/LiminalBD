@@ -306,6 +306,104 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
                     }
                 }
             }
+            ProtocolCommand::DreamNow => {
+                let report_opt = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move { field.lock().await.run_dream_cycle() }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    match report_opt {
+                        Some(report) => {
+                            let summary = format!(
+                                "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                                report.strengthened,
+                                report.weakened,
+                                report.pruned,
+                                report.rewired,
+                                report.protected,
+                                report.took_ms
+                            );
+                            if let Some(event) = event_from_field_log(&summary, 1_000) {
+                                outbox.push_event(event);
+                            }
+                            let payload = json!({
+                                "ev": "dream",
+                                "meta": {
+                                    "strengthened": report.strengthened,
+                                    "weakened": report.weakened,
+                                    "pruned": report.pruned,
+                                    "rewired": report.rewired,
+                                    "protected": report.protected,
+                                    "took_ms": report.took_ms
+                                }
+                            })
+                            .to_string();
+                            if let Some(event) = event_from_field_log(&payload, 1_000) {
+                                outbox.push_event(event);
+                            }
+                        }
+                        None => {
+                            let msg = "DREAM no-op (not enough activity)";
+                            if let Some(event) = event_from_field_log(msg, 1_000) {
+                                outbox.push_event(event);
+                            }
+                        }
+                    }
+                }
+            }
+            ProtocolCommand::DreamSet { cfg } => {
+                let updated = state.runtime.block_on({
+                    let field = state.field.clone();
+                    let cfg = cfg.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        guard.set_dream_config(cfg);
+                        guard.dream_config()
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "dream_config",
+                        "meta": {
+                            "min_idle_s": updated.min_idle_s,
+                            "window_ms": updated.window_ms,
+                            "strengthen_top_pct": updated.strengthen_top_pct,
+                            "weaken_bottom_pct": updated.weaken_bottom_pct,
+                            "protect_salience": updated.protect_salience,
+                            "adreno_protect": updated.adreno_protect,
+                            "max_ops_per_cycle": updated.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, 1_000) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
+            ProtocolCommand::DreamGet => {
+                let cfg = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move { field.lock().await.dream_config() }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "dream_config",
+                        "meta": {
+                            "min_idle_s": cfg.min_idle_s,
+                            "window_ms": cfg.window_ms,
+                            "strengthen_top_pct": cfg.strengthen_top_pct,
+                            "weaken_bottom_pct": cfg.weaken_bottom_pct,
+                            "protect_salience": cfg.protect_salience,
+                            "adreno_protect": cfg.adreno_protect,
+                            "max_ops_per_cycle": cfg.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, 1_000) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
         },
     }
 

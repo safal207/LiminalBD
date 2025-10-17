@@ -27,6 +27,9 @@ pub enum IncomingCommand {
     Lql { query: String },
     PolicySet { data: JsonValue },
     Subscribe { pattern: String },
+    DreamNow,
+    DreamSet { cfg: JsonValue },
+    DreamGet,
     Raw(JsonValue),
 }
 

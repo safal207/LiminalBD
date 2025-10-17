@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use liminal_core::types::{Hint, Impulse as CoreImpulse, ImpulseKind, Metrics as CoreMetrics};
-use liminal_core::TrsConfig;
+use liminal_core::{DreamConfig, TrsConfig};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Value;
 use serde_json::Value as JsonValue;
@@ -49,6 +49,12 @@ pub enum ProtocolCommand {
         #[serde(rename = "q")]
         query: String,
     },
+    #[serde(rename = "dream.now")]
+    DreamNow,
+    #[serde(rename = "dream.set")]
+    DreamSet { cfg: DreamConfig },
+    #[serde(rename = "dream.get")]
+    DreamGet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

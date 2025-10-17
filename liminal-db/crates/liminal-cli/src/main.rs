@@ -19,8 +19,9 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    parse_lql, ClusterField, HarmonyMetrics, HarmonySnapshot, LqlResponse, MirrorImpulse,
-    ReflexAction, ReflexRule, ReflexWhen, SymmetryStatus, TrsConfig, ViewStats,
+    parse_lql, ClusterField, DreamConfig, HarmonyMetrics, HarmonySnapshot,
+    LqlResponse, MirrorImpulse, ReflexAction, ReflexRule, ReflexWhen, SymmetryStatus, TrsConfig,
+    ViewStats,
 };
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
@@ -431,6 +432,16 @@ async fn run_interactive(
                             }
                         }
                     }
+                    command if command.starts_with("dream") => {
+                        if let Err(err) = handle_dream_command(
+                            command.trim_start_matches("dream").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("dream command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -795,6 +806,89 @@ async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) 
     }
 }
 
+async fn handle_dream_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "cfg" => {
+            let cfg = { field.lock().await.dream_config() };
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        "now" => {
+            let report_opt = { field.lock().await.run_dream_cycle() };
+            match report_opt {
+                Some(report) => {
+                    println!(
+                        "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                        report.strengthened,
+                        report.weakened,
+                        report.pruned,
+                        report.rewired,
+                        report.protected,
+                        report.took_ms
+                    );
+                    let payload = json!({
+                        "ev": "dream",
+                        "meta": {
+                            "strengthened": report.strengthened,
+                            "weakened": report.weakened,
+                            "pruned": report.pruned,
+                            "rewired": report.rewired,
+                            "protected": report.protected,
+                            "took_ms": report.took_ms
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                }
+                None => {
+                    println!("DREAM no-op (not enough activity)");
+                }
+            }
+        }
+        "set" => {
+            let raw = parts.next().unwrap_or("").trim();
+            if raw.is_empty() {
+                return Err(anyhow!("usage: :dream set <json>"));
+            }
+            let update: DreamConfigUpdate = serde_json::from_str(raw)?;
+            let cfg = {
+                let mut guard = field.lock().await;
+                let mut cfg = guard.dream_config();
+                update.apply(&mut cfg);
+                guard.set_dream_config(cfg.clone());
+                cfg
+            };
+            println!("DREAM_CONFIG {}", serde_json::to_string_pretty(&cfg)?);
+        }
+        "stats" => {
+            let reports = { field.lock().await.last_dream_reports(3) };
+            if reports.is_empty() {
+                println!("DREAM_STATS none");
+            } else {
+                for (ts, report) in reports {
+                    println!(
+                        "DREAM_STATS ts={} strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                        ts,
+                        report.strengthened,
+                        report.weakened,
+                        report.pruned,
+                        report.rewired,
+                        report.protected,
+                        report.took_ms
+                    );
+                }
+            }
+        }
+        "help" => {
+            println!("dream commands: now | cfg | set <json> | stats");
+        }
+        other => {
+            return Err(anyhow!("unknown dream subcommand: {}", other));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct ReflexAddRequest {
     token: String,
@@ -808,6 +902,50 @@ struct ReflexAddRequest {
 }
 fn default_enabled() -> bool {
     true
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DreamConfigUpdate {
+    #[serde(default)]
+    min_idle_s: Option<u32>,
+    #[serde(default)]
+    window_ms: Option<u32>,
+    #[serde(default)]
+    strengthen_top_pct: Option<f32>,
+    #[serde(default)]
+    weaken_bottom_pct: Option<f32>,
+    #[serde(default)]
+    protect_salience: Option<f32>,
+    #[serde(default)]
+    adreno_protect: Option<bool>,
+    #[serde(default)]
+    max_ops_per_cycle: Option<u32>,
+}
+
+impl DreamConfigUpdate {
+    fn apply(self, cfg: &mut DreamConfig) {
+        if let Some(value) = self.min_idle_s {
+            cfg.min_idle_s = value;
+        }
+        if let Some(value) = self.window_ms {
+            cfg.window_ms = value;
+        }
+        if let Some(value) = self.strengthen_top_pct {
+            cfg.strengthen_top_pct = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.weaken_bottom_pct {
+            cfg.weaken_bottom_pct = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.protect_salience {
+            cfg.protect_salience = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.adreno_protect {
+            cfg.adreno_protect = value;
+        }
+        if let Some(value) = self.max_ops_per_cycle {
+            cfg.max_ops_per_cycle = value.max(1);
+        }
+    }
 }
 
 async fn handle_network_command(
@@ -843,6 +981,50 @@ async fn handle_network_command(
             println!("POLICY_SET {:?}", data);
         }
         IncomingCommand::Subscribe { .. } => {}
+        IncomingCommand::DreamNow => {
+            let report_opt = { field.lock().await.run_dream_cycle() };
+            match report_opt {
+                Some(report) => {
+                    println!(
+                        "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                        report.strengthened,
+                        report.weakened,
+                        report.pruned,
+                        report.rewired,
+                        report.protected,
+                        report.took_ms
+                    );
+                    let payload = json!({
+                        "ev": "dream",
+                        "meta": {
+                            "strengthened": report.strengthened,
+                            "weakened": report.weakened,
+                            "pruned": report.pruned,
+                            "rewired": report.rewired,
+                            "protected": report.protected,
+                            "took_ms": report.took_ms
+                        }
+                    });
+                    print_event_line(&payload.to_string());
+                }
+                None => println!("DREAM no-op (not enough activity)"),
+            }
+        }
+        IncomingCommand::DreamSet { cfg } => {
+            let update: DreamConfigUpdate = serde_json::from_value(cfg)?;
+            let cfg = {
+                let mut guard = field.lock().await;
+                let mut cfg = guard.dream_config();
+                update.apply(&mut cfg);
+                guard.set_dream_config(cfg.clone());
+                cfg
+            };
+            println!("DREAM_CONFIG {}", serde_json::to_string_pretty(&cfg)?);
+        }
+        IncomingCommand::DreamGet => {
+            let cfg = { field.lock().await.dream_config() };
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
         IncomingCommand::Raw(value) => {
             println!("WS RAW {}", value);
         }

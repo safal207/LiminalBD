@@ -99,6 +99,83 @@ impl WasmState {
                         }
                     }
                 }
+                ProtocolCommand::DreamNow => {
+                    match self.field.run_dream_cycle() {
+                        Some(report) => {
+                            let summary = format!(
+                                "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                                report.strengthened,
+                                report.weakened,
+                                report.pruned,
+                                report.rewired,
+                                report.protected,
+                                report.took_ms
+                            );
+                            if let Some(event) = event_from_field_log(&summary, self.tick_ms) {
+                                self.outbox.push_event(event);
+                            }
+                            let payload = json!({
+                                "ev": "dream",
+                                "meta": {
+                                    "strengthened": report.strengthened,
+                                    "weakened": report.weakened,
+                                    "pruned": report.pruned,
+                                    "rewired": report.rewired,
+                                    "protected": report.protected,
+                                    "took_ms": report.took_ms
+                                }
+                            })
+                            .to_string();
+                            if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                                self.outbox.push_event(event);
+                            }
+                        }
+                        None => {
+                            let msg = "DREAM no-op (not enough activity)";
+                            if let Some(event) = event_from_field_log(msg, self.tick_ms) {
+                                self.outbox.push_event(event);
+                            }
+                        }
+                    }
+                }
+                ProtocolCommand::DreamSet { cfg } => {
+                    self.field.set_dream_config(cfg.clone());
+                    let payload = json!({
+                        "ev": "dream_config",
+                        "meta": {
+                            "min_idle_s": cfg.min_idle_s,
+                            "window_ms": cfg.window_ms,
+                            "strengthen_top_pct": cfg.strengthen_top_pct,
+                            "weaken_bottom_pct": cfg.weaken_bottom_pct,
+                            "protect_salience": cfg.protect_salience,
+                            "adreno_protect": cfg.adreno_protect,
+                            "max_ops_per_cycle": cfg.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
+                }
+                ProtocolCommand::DreamGet => {
+                    let cfg = self.field.dream_config();
+                    let payload = json!({
+                        "ev": "dream_config",
+                        "meta": {
+                            "min_idle_s": cfg.min_idle_s,
+                            "window_ms": cfg.window_ms,
+                            "strengthen_top_pct": cfg.strengthen_top_pct,
+                            "weaken_bottom_pct": cfg.weaken_bottom_pct,
+                            "protect_salience": cfg.protect_salience,
+                            "adreno_protect": cfg.adreno_protect,
+                            "max_ops_per_cycle": cfg.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
+                }
             },
         }
     }
