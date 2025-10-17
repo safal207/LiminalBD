@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dream_engine::{DreamConfig, DreamReport};
 use crate::reflex::{ReflexFire, ReflexId, ReflexRule};
+use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::TrsConfig;
 use crate::types::{NodeId, NodeState};
 
@@ -48,6 +49,8 @@ pub enum EventDelta {
     TrsHarmony(TrsHarmonyDelta),
     #[serde(rename = "dream_config")]
     DreamConfig(DreamConfig),
+    #[serde(rename = "sync_config")]
+    SyncConfig(SyncConfig),
     #[serde(rename = "dream_strengthen")]
     DreamStrengthen(DreamEdgeDelta),
     #[serde(rename = "dream_weaken")]
@@ -58,6 +61,12 @@ pub enum EventDelta {
     DreamRewire(DreamLinkDelta),
     #[serde(rename = "dream_report")]
     DreamReport(DreamReportDelta),
+    #[serde(rename = "sync_share")]
+    SyncShare(SyncShareDelta),
+    #[serde(rename = "sync_align")]
+    SyncAlign(SyncAlignDelta),
+    #[serde(rename = "collective_dream_report")]
+    CollectiveDreamReport(CollectiveDreamReportDelta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +132,26 @@ pub struct DreamLinkDelta {
 pub struct DreamReportDelta {
     pub now_ms: u64,
     pub report: DreamReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncShareDelta {
+    pub node: NodeId,
+    pub token: String,
+    pub bias: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncAlignDelta {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectiveDreamReportDelta {
+    pub now_ms: u64,
+    pub report: SyncReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

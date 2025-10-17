@@ -56,7 +56,11 @@ pub fn run_dream(field: &mut ClusterField, cfg: &DreamConfig, now_ms: u64) -> Dr
         return report;
     }
 
-    pairs.sort_by(|a, b| b.freq.partial_cmp(&a.freq).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_by(|a, b| {
+        b.freq
+            .partial_cmp(&a.freq)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let total_pairs = pairs.len();
     let strengthen_count = ((total_pairs as f32) * cfg.strengthen_top_pct)
@@ -89,7 +93,11 @@ pub fn run_dream(field: &mut ClusterField, cfg: &DreamConfig, now_ms: u64) -> Dr
 
     if ops_remaining > 0 && weaken_count > 0 {
         let mut bottom = pairs;
-        bottom.sort_by(|a, b| a.freq.partial_cmp(&b.freq).unwrap_or(std::cmp::Ordering::Equal));
+        bottom.sort_by(|a, b| {
+            a.freq
+                .partial_cmp(&b.freq)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for entry in bottom.iter().take(weaken_count) {
             if ops_remaining == 0 {
                 break;

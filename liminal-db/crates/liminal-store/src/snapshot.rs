@@ -1,5 +1,7 @@
 use anyhow::Result;
-use liminal_core::{CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, SeedParams, TrsState};
+use liminal_core::{
+    CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, SeedParams, SyncConfig, TrsState,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +17,8 @@ struct SnapshotEnvelope {
     trs: Option<TrsState>,
     #[serde(default)]
     dream: Option<DreamConfig>,
+    #[serde(default)]
+    sync: Option<SyncConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +30,7 @@ pub struct ClusterFieldSeed {
     pub next_reflex_id: u64,
     pub trs: TrsState,
     pub dream: DreamConfig,
+    pub sync: SyncConfig,
 }
 
 impl ClusterFieldSeed {
@@ -53,6 +58,7 @@ impl ClusterFieldSeed {
         }
         field.trs = self.trs.clone();
         field.set_dream_config(self.dream.clone());
+        field.set_sync_config(self.sync.clone());
         field.rebuild_caches();
         field
     }
@@ -72,6 +78,7 @@ pub fn create_snapshot(cluster: &ClusterField) -> Result<Vec<u8>> {
         next_reflex_id: cluster.next_reflex_id,
         trs: Some(cluster.trs.clone()),
         dream: Some(cluster.dream_config()),
+        sync: Some(cluster.sync_config()),
     };
     Ok(serde_cbor::to_vec(&envelope)?)
 }
@@ -86,6 +93,7 @@ pub fn load_snapshot(bytes: &[u8]) -> Result<ClusterFieldSeed> {
         next_reflex_id: envelope.next_reflex_id,
         trs: envelope.trs.unwrap_or_default(),
         dream: envelope.dream.unwrap_or_default(),
+        sync: envelope.sync.unwrap_or_default(),
     })
 }
 

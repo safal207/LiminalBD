@@ -2,9 +2,9 @@ use std::cell::RefCell;
 
 use js_sys::Uint8Array;
 use liminal_core::morph_mind::{analyze, hints as gather_hints};
-use liminal_core::parse_lql;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
+use liminal_core::{detect_sync_groups, parse_lql, run_collective_dream};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
@@ -99,10 +99,9 @@ impl WasmState {
                         }
                     }
                 }
-                ProtocolCommand::DreamNow => {
-                    match self.field.run_dream_cycle() {
-                        Some(report) => {
-                            let summary = format!(
+                ProtocolCommand::DreamNow => match self.field.run_dream_cycle() {
+                    Some(report) => {
+                        let summary = format!(
                                 "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
                                 report.strengthened,
                                 report.weakened,
@@ -111,33 +110,32 @@ impl WasmState {
                                 report.protected,
                                 report.took_ms
                             );
-                            if let Some(event) = event_from_field_log(&summary, self.tick_ms) {
-                                self.outbox.push_event(event);
-                            }
-                            let payload = json!({
-                                "ev": "dream",
-                                "meta": {
-                                    "strengthened": report.strengthened,
-                                    "weakened": report.weakened,
-                                    "pruned": report.pruned,
-                                    "rewired": report.rewired,
-                                    "protected": report.protected,
-                                    "took_ms": report.took_ms
-                                }
-                            })
-                            .to_string();
-                            if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
-                                self.outbox.push_event(event);
-                            }
+                        if let Some(event) = event_from_field_log(&summary, self.tick_ms) {
+                            self.outbox.push_event(event);
                         }
-                        None => {
-                            let msg = "DREAM no-op (not enough activity)";
-                            if let Some(event) = event_from_field_log(msg, self.tick_ms) {
-                                self.outbox.push_event(event);
+                        let payload = json!({
+                            "ev": "dream",
+                            "meta": {
+                                "strengthened": report.strengthened,
+                                "weakened": report.weakened,
+                                "pruned": report.pruned,
+                                "rewired": report.rewired,
+                                "protected": report.protected,
+                                "took_ms": report.took_ms
                             }
+                        })
+                        .to_string();
+                        if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                            self.outbox.push_event(event);
                         }
                     }
-                }
+                    None => {
+                        let msg = "DREAM no-op (not enough activity)";
+                        if let Some(event) = event_from_field_log(msg, self.tick_ms) {
+                            self.outbox.push_event(event);
+                        }
+                    }
+                },
                 ProtocolCommand::DreamSet { cfg } => {
                     self.field.set_dream_config(cfg.clone());
                     let payload = json!({
@@ -169,6 +167,78 @@ impl WasmState {
                             "protect_salience": cfg.protect_salience,
                             "adreno_protect": cfg.adreno_protect,
                             "max_ops_per_cycle": cfg.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
+                }
+                ProtocolCommand::SyncNow => {
+                    let cfg = self.field.sync_config();
+                    let groups = detect_sync_groups(&self.field, &cfg, self.field.now_ms);
+                    if groups.is_empty() {
+                        if let Some(event) = event_from_field_log(
+                            "COLLECTIVE_DREAM no-op (no qualifying groups)",
+                            self.tick_ms,
+                        ) {
+                            self.outbox.push_event(event);
+                        }
+                    } else {
+                        let report =
+                            run_collective_dream(&mut self.field, &groups, &cfg, self.field.now_ms);
+                        let summary = format!(
+                            "COLLECTIVE_DREAM groups={} shared={} aligned={} protected={} took={}ms",
+                            report.groups, report.shared, report.aligned, report.protected, report.took_ms
+                        );
+                        if let Some(event) = event_from_field_log(&summary, self.tick_ms) {
+                            self.outbox.push_event(event);
+                        }
+                        let payload = json!({
+                            "ev": "collective_dream",
+                            "meta": {
+                                "groups": report.groups,
+                                "shared": report.shared,
+                                "aligned": report.aligned,
+                                "protected": report.protected,
+                                "took_ms": report.took_ms
+                            }
+                        })
+                        .to_string();
+                        if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                            self.outbox.push_event(event);
+                        }
+                    }
+                }
+                ProtocolCommand::SyncSet { cfg } => {
+                    self.field.set_sync_config(cfg.clone());
+                    let payload = json!({
+                        "ev": "sync_config",
+                        "meta": {
+                            "phase_len_ms": cfg.phase_len_ms,
+                            "phase_gap_ms": cfg.phase_gap_ms,
+                            "cooccur_threshold": cfg.cooccur_threshold,
+                            "max_groups": cfg.max_groups,
+                            "share_top_k": cfg.share_top_k,
+                            "weight_xfer": cfg.weight_xfer
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, self.tick_ms) {
+                        self.outbox.push_event(event);
+                    }
+                }
+                ProtocolCommand::SyncGet => {
+                    let cfg = self.field.sync_config();
+                    let payload = json!({
+                        "ev": "sync_config",
+                        "meta": {
+                            "phase_len_ms": cfg.phase_len_ms,
+                            "phase_gap_ms": cfg.phase_gap_ms,
+                            "cooccur_threshold": cfg.cooccur_threshold,
+                            "max_groups": cfg.max_groups,
+                            "share_top_k": cfg.share_top_k,
+                            "weight_xfer": cfg.weight_xfer
                         }
                     })
                     .to_string();

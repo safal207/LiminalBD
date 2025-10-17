@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use liminal_core::life_loop::run_loop;
-use liminal_core::parse_lql;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
+use liminal_core::{detect_sync_groups, parse_lql, run_collective_dream};
 use liminal_store::{decode_delta, DiskJournal, Offset};
 use serde_json::json;
 use tokio::runtime::Builder;
@@ -396,6 +396,106 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
                             "protect_salience": cfg.protect_salience,
                             "adreno_protect": cfg.adreno_protect,
                             "max_ops_per_cycle": cfg.max_ops_per_cycle
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, 1_000) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
+            ProtocolCommand::SyncNow => {
+                let report_opt = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        let cfg = guard.sync_config();
+                        let now_ms = guard.now_ms;
+                        let groups = detect_sync_groups(&*guard, &cfg, now_ms);
+                        if groups.is_empty() {
+                            None
+                        } else {
+                            Some(run_collective_dream(&mut *guard, &groups, &cfg, now_ms))
+                        }
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    match report_opt {
+                        Some(report) => {
+                            let summary = format!(
+                                "COLLECTIVE_DREAM groups={} shared={} aligned={} protected={} took={}ms",
+                                report.groups, report.shared, report.aligned, report.protected, report.took_ms
+                            );
+                            if let Some(event) = event_from_field_log(&summary, 1_000) {
+                                outbox.push_event(event);
+                            }
+                            let payload = json!({
+                                "ev": "collective_dream",
+                                "meta": {
+                                    "groups": report.groups,
+                                    "shared": report.shared,
+                                    "aligned": report.aligned,
+                                    "protected": report.protected,
+                                    "took_ms": report.took_ms
+                                }
+                            })
+                            .to_string();
+                            if let Some(event) = event_from_field_log(&payload, 1_000) {
+                                outbox.push_event(event);
+                            }
+                        }
+                        None => {
+                            let msg = "COLLECTIVE_DREAM no-op (no qualifying groups)";
+                            if let Some(event) = event_from_field_log(msg, 1_000) {
+                                outbox.push_event(event);
+                            }
+                        }
+                    }
+                }
+            }
+            ProtocolCommand::SyncSet { cfg } => {
+                let updated = state.runtime.block_on({
+                    let field = state.field.clone();
+                    let cfg = cfg.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        guard.set_sync_config(cfg);
+                        guard.sync_config()
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "sync_config",
+                        "meta": {
+                            "phase_len_ms": updated.phase_len_ms,
+                            "phase_gap_ms": updated.phase_gap_ms,
+                            "cooccur_threshold": updated.cooccur_threshold,
+                            "max_groups": updated.max_groups,
+                            "share_top_k": updated.share_top_k,
+                            "weight_xfer": updated.weight_xfer
+                        }
+                    })
+                    .to_string();
+                    if let Some(event) = event_from_field_log(&payload, 1_000) {
+                        outbox.push_event(event);
+                    }
+                }
+            }
+            ProtocolCommand::SyncGet => {
+                let cfg = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move { field.lock().await.sync_config() }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "sync_config",
+                        "meta": {
+                            "phase_len_ms": cfg.phase_len_ms,
+                            "phase_gap_ms": cfg.phase_gap_ms,
+                            "cooccur_threshold": cfg.cooccur_threshold,
+                            "max_groups": cfg.max_groups,
+                            "share_top_k": cfg.share_top_k,
+                            "weight_xfer": cfg.weight_xfer
                         }
                     })
                     .to_string();

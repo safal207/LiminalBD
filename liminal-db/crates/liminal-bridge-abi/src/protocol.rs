@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use liminal_core::types::{Hint, Impulse as CoreImpulse, ImpulseKind, Metrics as CoreMetrics};
-use liminal_core::{DreamConfig, TrsConfig};
+use liminal_core::{DreamConfig, SyncConfig, TrsConfig};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Value;
 use serde_json::Value as JsonValue;
@@ -55,6 +55,12 @@ pub enum ProtocolCommand {
     DreamSet { cfg: DreamConfig },
     #[serde(rename = "dream.get")]
     DreamGet,
+    #[serde(rename = "sync.set")]
+    SyncSet { cfg: SyncConfig },
+    #[serde(rename = "sync.get")]
+    SyncGet,
+    #[serde(rename = "sync.now")]
+    SyncNow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -225,6 +231,23 @@ pub fn event_from_field_log(log: &str, tick_ms: u32) -> Option<ProtocolEvent> {
         return Some(ProtocolEvent {
             ev: "dead".into(),
             id: id.into(),
+            dt: tick_ms,
+            meta,
+        });
+    }
+    if let Some(rest) = trimmed.strip_prefix("COLLECTIVE_DREAM ") {
+        let mut meta = BTreeMap::new();
+        for chunk in rest.split_whitespace() {
+            if let Some((key, raw)) = chunk.split_once('=') {
+                let cleaned = raw.trim_end_matches("ms");
+                if let Ok(value) = cleaned.parse::<u64>() {
+                    meta.insert(key.to_string(), Value::Integer(value as i128));
+                }
+            }
+        }
+        return Some(ProtocolEvent {
+            ev: "collective_dream".into(),
+            id: EventId::Text("collective_dream".into()),
             dt: tick_ms,
             meta,
         });

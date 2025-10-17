@@ -19,9 +19,9 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    parse_lql, ClusterField, DreamConfig, HarmonyMetrics, HarmonySnapshot,
-    LqlResponse, MirrorImpulse, ReflexAction, ReflexRule, ReflexWhen, SymmetryStatus, TrsConfig,
-    ViewStats,
+    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig, HarmonyMetrics,
+    HarmonySnapshot, LqlResponse, MirrorImpulse, ReflexAction, ReflexRule, ReflexWhen,
+    SymmetryStatus, SyncConfig, TrsConfig, ViewStats,
 };
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
@@ -442,6 +442,16 @@ async fn run_interactive(
                             eprintln!("dream command failed: {err}");
                         }
                     }
+                    command if command.starts_with("sync") => {
+                        if let Err(err) = handle_sync_command(
+                            command.trim_start_matches("sync").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("sync command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -806,6 +816,94 @@ async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) 
     }
 }
 
+async fn handle_sync_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "cfg" => {
+            let cfg = { field.lock().await.sync_config() };
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        "set" => {
+            let raw = parts.next().unwrap_or("").trim();
+            if raw.is_empty() {
+                return Err(anyhow!("usage: :sync set <json>"));
+            }
+            let cfg: SyncConfig = serde_json::from_str(raw)?;
+            let updated = {
+                let mut guard = field.lock().await;
+                guard.set_sync_config(cfg);
+                guard.sync_config()
+            };
+            println!("SYNC_CONFIG {}", serde_json::to_string_pretty(&updated)?);
+        }
+        "now" => {
+            let report_opt = {
+                let mut guard = field.lock().await;
+                let cfg = guard.sync_config();
+                let now_ms = guard.now_ms;
+                let groups = detect_sync_groups(&*guard, &cfg, now_ms);
+                if groups.is_empty() {
+                    None
+                } else {
+                    Some(run_collective_dream(&mut *guard, &groups, &cfg, now_ms))
+                }
+            };
+            match report_opt {
+                Some(report) => {
+                    println!(
+                        "COLLECTIVE_DREAM groups={} shared={} aligned={} protected={} took={}ms",
+                        report.groups,
+                        report.shared,
+                        report.aligned,
+                        report.protected,
+                        report.took_ms
+                    );
+                    let payload = json!({
+                        "ev": "collective_dream",
+                        "meta": {
+                            "groups": report.groups,
+                            "shared": report.shared,
+                            "aligned": report.aligned,
+                            "protected": report.protected,
+                            "took_ms": report.took_ms
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                }
+                None => {
+                    println!("COLLECTIVE_DREAM no-op (no qualifying groups)");
+                }
+            }
+        }
+        "stats" => {
+            let reports = { field.lock().await.last_sync_reports(3) };
+            if reports.is_empty() {
+                println!("SYNC_STATS none");
+            } else {
+                for (ts, report) in reports {
+                    println!(
+                        "SYNC_STATS ts={} groups={} shared={} aligned={} protected={} took={}ms",
+                        ts,
+                        report.groups,
+                        report.shared,
+                        report.aligned,
+                        report.protected,
+                        report.took_ms
+                    );
+                }
+            }
+        }
+        "help" => {
+            println!("sync commands: cfg | set <json> | now | stats");
+        }
+        other => {
+            return Err(anyhow!("unknown sync subcommand: {}", other));
+        }
+    }
+    Ok(())
+}
+
 async fn handle_dream_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
     let mut parts = command.splitn(2, ' ');
     let sub = parts.next().unwrap_or("").trim();
@@ -1023,6 +1121,56 @@ async fn handle_network_command(
         }
         IncomingCommand::DreamGet => {
             let cfg = { field.lock().await.dream_config() };
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        IncomingCommand::SyncNow => {
+            let report_opt = {
+                let mut guard = field.lock().await;
+                let cfg = guard.sync_config();
+                let now_ms = guard.now_ms;
+                let groups = detect_sync_groups(&*guard, &cfg, now_ms);
+                if groups.is_empty() {
+                    None
+                } else {
+                    Some(run_collective_dream(&mut *guard, &groups, &cfg, now_ms))
+                }
+            };
+            match report_opt {
+                Some(report) => {
+                    println!(
+                        "COLLECTIVE_DREAM groups={} shared={} aligned={} protected={} took={}ms",
+                        report.groups,
+                        report.shared,
+                        report.aligned,
+                        report.protected,
+                        report.took_ms
+                    );
+                    let payload = json!({
+                        "ev": "collective_dream",
+                        "meta": {
+                            "groups": report.groups,
+                            "shared": report.shared,
+                            "aligned": report.aligned,
+                            "protected": report.protected,
+                            "took_ms": report.took_ms
+                        }
+                    });
+                    print_event_line(&payload.to_string());
+                }
+                None => println!("COLLECTIVE_DREAM no-op (no qualifying groups)"),
+            }
+        }
+        IncomingCommand::SyncSet { cfg } => {
+            let cfg: SyncConfig = serde_json::from_value(cfg)?;
+            let updated = {
+                let mut guard = field.lock().await;
+                guard.set_sync_config(cfg);
+                guard.sync_config()
+            };
+            println!("SYNC_CONFIG {}", serde_json::to_string_pretty(&updated)?);
+        }
+        IncomingCommand::SyncGet => {
+            let cfg = { field.lock().await.sync_config() };
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
         IncomingCommand::Raw(value) => {

@@ -194,11 +194,23 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
                                         "dream.get" => {
                                             let _ = cmd_tx.send(IncomingCommand::DreamGet).await;
                                         }
-                                            other => {
-                                                warn!(command = %other, "ws_server.unknown_cmd");
-                                                let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
-                                            }
+                                        "sync.now" => {
+                                            let _ = cmd_tx.send(IncomingCommand::SyncNow).await;
                                         }
+                                        "sync.set" => {
+                                            let cfg = value.get("cfg").cloned().unwrap_or(JsonValue::Null);
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::SyncSet { cfg })
+                                                .await;
+                                        }
+                                        "sync.get" => {
+                                            let _ = cmd_tx.send(IncomingCommand::SyncGet).await;
+                                        }
+                                        other => {
+                                            warn!(command = %other, "ws_server.unknown_cmd");
+                                            let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
+                                        }
+                                    }
                                         } else {
                                             let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
                                         }
