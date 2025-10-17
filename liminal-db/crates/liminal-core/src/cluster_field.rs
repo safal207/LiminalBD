@@ -6,6 +6,7 @@ use rand::Rng;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::awakening::AwakeningConfig;
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
     AffinityDelta, CellSnapshot, CollectiveDreamReportDelta, DivideDelta, DreamEdgeDelta,
@@ -18,6 +19,7 @@ use crate::lql::{
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
+use crate::resonant::{ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -48,6 +50,9 @@ pub struct ClusterField {
     dream_reports: VecDeque<(u64, DreamReport)>,
     sync_cfg: SyncConfig,
     sync_reports: VecDeque<(u64, SyncReport)>,
+    resonant_model: Option<ResonantModel>,
+    awakening_cfg: AwakeningConfig,
+    sync_log: SyncLog,
     pub trs: TrsState,
     harmony: HarmonyTuning,
     pub views: ViewRegistry,
@@ -129,6 +134,9 @@ impl ClusterField {
             dream_reports: VecDeque::new(),
             sync_cfg: SyncConfig::default(),
             sync_reports: VecDeque::new(),
+            resonant_model: None,
+            awakening_cfg: AwakeningConfig::default(),
+            sync_log: SyncLog::new(),
             trs: TrsState::default(),
             harmony: HarmonyTuning::default(),
             views: ViewRegistry::new(),
@@ -197,6 +205,30 @@ impl ClusterField {
             .collect();
         collected.reverse();
         collected
+    }
+
+    pub fn resonant_model(&self) -> Option<&ResonantModel> {
+        self.resonant_model.as_ref()
+    }
+
+    pub fn set_resonant_model(&mut self, model: ResonantModel) {
+        self.resonant_model = Some(model);
+    }
+
+    pub fn clear_resonant_model(&mut self) {
+        self.resonant_model = None;
+    }
+
+    pub fn awakening_config(&self) -> AwakeningConfig {
+        self.awakening_cfg.clone()
+    }
+
+    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
+        self.awakening_cfg = cfg;
+    }
+
+    pub fn sync_log(&self) -> &SyncLog {
+        &self.sync_log
     }
 
     pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
@@ -794,6 +826,18 @@ impl ClusterField {
         }));
     }
 
+    pub(crate) fn emit_energy_state(&self, id: NodeId) {
+        if let Some(cell) = self.cells.get(&id) {
+            self.emit(EventDelta::Energy(EnergyDelta {
+                id,
+                energy: cell.energy,
+                metabolism: cell.metabolism,
+                state: cell.state,
+                last_response_ms: cell.last_response_ms,
+            }));
+        }
+    }
+
     pub(crate) fn emit_dream_weaken(&self, from: NodeId, to: NodeId, freq: f32, avg_strength: f32) {
         self.emit(EventDelta::DreamWeaken(DreamEdgeDelta {
             from,
@@ -813,6 +857,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_dream_report(&mut self, now_ms: u64, report: DreamReport) {
+        self.sync_log.record_dream(now_ms, &report);
         self.dream_reports.push_back((now_ms, report.clone()));
         while self.dream_reports.len() > 16 {
             self.dream_reports.pop_front();
@@ -821,6 +866,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_sync_report(&mut self, now_ms: u64, report: SyncReport) {
+        self.sync_log.record_collective(now_ms, &report);
         self.sync_reports.push_back((now_ms, report.clone()));
         while self.sync_reports.len() > 16 {
             self.sync_reports.pop_front();
