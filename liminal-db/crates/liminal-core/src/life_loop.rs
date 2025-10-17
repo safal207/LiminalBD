@@ -4,8 +4,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
+use crate::awakening::awaken;
 use crate::cluster_field::ClusterField;
 use crate::morph_mind::{analyze, hints as gather_hints};
+use crate::resonant::build_model;
 use crate::synchrony::{detect_sync_groups, run_collective_dream};
 use crate::types::{Hint, Metrics};
 use serde_json::json;
@@ -151,6 +153,7 @@ pub async fn run_loop<F, G, H>(
                         })
                         .to_string(),
                     );
+                    rebuild_and_awaken(&mut *guard, &mut tick_ms, &mut events);
                 }
             }
             let sync_cfg = guard.sync_config();
@@ -183,6 +186,7 @@ pub async fn run_loop<F, G, H>(
                             })
                             .to_string(),
                         );
+                        rebuild_and_awaken(&mut *guard, &mut tick_ms, &mut events);
                         shared_state.active = true;
                         shared_state.phase_until =
                             guard.now_ms.saturating_add(sync_cfg.phase_len_ms as u64);
@@ -264,5 +268,52 @@ fn apply_hints(field: &mut ClusterField, tick_ms: &mut u64, hints: &[Hint]) {
                 field.inject_seed_variation("liminal/wake");
             }
         }
+    }
+}
+
+fn rebuild_and_awaken(field: &mut ClusterField, tick_ms: &mut u64, events: &mut Vec<String>) {
+    let history: Vec<_> = field
+        .last_dream_reports(8)
+        .into_iter()
+        .map(|(_, report)| report)
+        .collect();
+    if history.is_empty() && field.sync_log().is_empty() {
+        field.clear_resonant_model();
+        return;
+    }
+    let model = build_model(field, field.sync_log(), &history);
+    field.set_resonant_model(model.clone());
+    let cfg = field.awakening_config();
+    let mut trs_state = std::mem::take(&mut field.trs);
+    let report = awaken(field, &model, &cfg, &mut trs_state);
+    field.trs = trs_state;
+    events.push(format!(
+        "AWAKEN applied={} protected={} tension={:.2} tick={}ms",
+        report.applied, report.protected, report.avg_tension, report.tick_adjust_ms
+    ));
+    events.push(
+        json!({
+            "ev": "awaken_apply",
+            "meta": {"count": report.applied, "energy_delta": report.energy_delta}
+        })
+        .to_string(),
+    );
+    events.push(
+        json!({
+            "ev": "awaken_protect",
+            "meta": {"count": report.protected}
+        })
+        .to_string(),
+    );
+    events.push(
+        json!({
+            "ev": "awaken_tick",
+            "meta": {"adjust_ms": report.tick_adjust_ms, "avg_tension": report.avg_tension}
+        })
+        .to_string(),
+    );
+    if report.tick_adjust_ms != 0 {
+        let adjusted = ((*tick_ms as i64) + report.tick_adjust_ms as i64).clamp(80, 800);
+        *tick_ms = adjusted as u64;
     }
 }
