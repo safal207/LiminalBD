@@ -26,9 +26,30 @@ pub async fn run_loop<F, G, H>(
 
     let mut elapsed_since_metrics = 0u64;
     let mut elapsed_since_partial = 0u64;
+    let mut last_metrics: Option<Metrics> = None;
+    struct DreamState {
+        last_start_ms: u64,
+        restore_tick: Option<u64>,
+        slowed_once: bool,
+    }
+    let mut dream_state = DreamState {
+        last_start_ms: 0,
+        restore_tick: None,
+        slowed_once: false,
+    };
 
     loop {
+        if let Some(original) = dream_state.restore_tick {
+            if dream_state.slowed_once {
+                tick_ms = original;
+                dream_state.restore_tick = None;
+                dream_state.slowed_once = false;
+            }
+        }
         sleep(Duration::from_millis(tick_ms)).await;
+        if dream_state.restore_tick.is_some() && !dream_state.slowed_once {
+            dream_state.slowed_once = true;
+        }
         let mut guard = field.lock().await;
         let mut events = guard.tick_all(tick_ms);
 
@@ -64,7 +85,54 @@ pub async fn run_loop<F, G, H>(
             }
             apply_hints(&mut *guard, &mut tick_ms, &advice);
             on_metrics(&metrics);
+            last_metrics = Some(metrics.clone());
             elapsed_since_metrics = 0;
+        }
+        if let Some(metrics) = last_metrics.as_ref() {
+            let cfg = guard.dream_config();
+            let idle_elapsed = guard
+                .now_ms
+                .saturating_sub(dream_state.last_start_ms);
+            if metrics.sleeping_pct > 0.6
+                && metrics.live_load < 0.4
+                && idle_elapsed > (cfg.min_idle_s as u64) * 1_000
+            {
+                if let Some(report) = guard.run_dream_cycle() {
+                    dream_state.last_start_ms = guard.now_ms;
+                    let original_tick = dream_state.restore_tick.unwrap_or(tick_ms);
+                    dream_state.restore_tick = Some(original_tick);
+                    dream_state.slowed_once = false;
+                    let mut slower = ((tick_ms as f32) * 1.15).round() as u64;
+                    if slower <= tick_ms {
+                        slower = tick_ms.saturating_add(5);
+                    }
+                    slower = slower.clamp(80, 800);
+                    tick_ms = slower;
+                    events.push(format!(
+                        "DREAM strengthened={} weakened={} pruned={} rewired={} protected={} took={}ms",
+                        report.strengthened,
+                        report.weakened,
+                        report.pruned,
+                        report.rewired,
+                        report.protected,
+                        report.took_ms
+                    ));
+                    events.push(
+                        json!({
+                            "ev": "dream",
+                            "meta": {
+                                "strengthened": report.strengthened,
+                                "weakened": report.weakened,
+                                "pruned": report.pruned,
+                                "rewired": report.rewired,
+                                "protected": report.protected,
+                                "took_ms": report.took_ms
+                            }
+                        })
+                        .to_string(),
+                    );
+                }
+            }
         }
         let partial_payload = partial_payload;
         drop(guard);

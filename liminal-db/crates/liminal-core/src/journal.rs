@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::dream_engine::{DreamConfig, DreamReport};
 use crate::reflex::{ReflexFire, ReflexId, ReflexRule};
 use crate::trs::TrsConfig;
 use crate::types::{NodeId, NodeState};
@@ -45,6 +46,18 @@ pub enum EventDelta {
     TrsTrace(TrsTraceDelta),
     #[serde(rename = "trs_harmony")]
     TrsHarmony(TrsHarmonyDelta),
+    #[serde(rename = "dream_config")]
+    DreamConfig(DreamConfig),
+    #[serde(rename = "dream_strengthen")]
+    DreamStrengthen(DreamEdgeDelta),
+    #[serde(rename = "dream_weaken")]
+    DreamWeaken(DreamEdgeDelta),
+    #[serde(rename = "dream_prune")]
+    DreamPrune(DreamLinkDelta),
+    #[serde(rename = "dream_rewire")]
+    DreamRewire(DreamLinkDelta),
+    #[serde(rename = "dream_report")]
+    DreamReport(DreamReportDelta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +100,29 @@ pub struct StateDelta {
 pub struct LinkDelta {
     pub from: NodeId,
     pub to: NodeId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamEdgeDelta {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub score: f32,
+    #[serde(default)]
+    pub freq: f32,
+    #[serde(default)]
+    pub avg_strength: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamLinkDelta {
+    pub from: NodeId,
+    pub to: NodeId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamReportDelta {
+    pub now_ms: u64,
+    pub report: DreamReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

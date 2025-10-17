@@ -1,4 +1,5 @@
 pub mod cluster_field;
+pub mod dream_engine;
 pub mod journal;
 pub mod life_loop;
 pub mod lql;
@@ -13,6 +14,7 @@ pub mod types;
 pub mod views;
 
 pub use cluster_field::{ClusterField, FieldEvents};
+pub use dream_engine::{DreamConfig, DreamReport};
 pub use journal::{CellSnapshot, EventDelta, Journal};
 pub use life_loop::run_loop;
 pub use lql::{

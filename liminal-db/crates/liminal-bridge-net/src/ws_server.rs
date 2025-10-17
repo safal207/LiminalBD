@@ -177,16 +177,28 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
                                                     let _ = cmd_tx.send(IncomingCommand::PolicySet { data }).await;
                                                 }
                                                 "subscribe" => {
-                                                    if let Some(pattern) = value.get("pattern").and_then(|v| v.as_str()) {
-                                                        let query = format!("SUBSCRIBE {}", pattern);
-                                                        let _ = cmd_tx.send(IncomingCommand::Lql { query }).await;
-                                                    }
-                                                }
-                                                other => {
-                                                    warn!(command = %other, "ws_server.unknown_cmd");
-                                                    let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
-                                                }
+                                            if let Some(pattern) = value.get("pattern").and_then(|v| v.as_str()) {
+                                                let query = format!("SUBSCRIBE {}", pattern);
+                                                let _ = cmd_tx.send(IncomingCommand::Lql { query }).await;
                                             }
+                                        }
+                                        "dream.now" => {
+                                            let _ = cmd_tx.send(IncomingCommand::DreamNow).await;
+                                        }
+                                        "dream.set" => {
+                                            let cfg = value.get("cfg").cloned().unwrap_or(JsonValue::Null);
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::DreamSet { cfg })
+                                                .await;
+                                        }
+                                        "dream.get" => {
+                                            let _ = cmd_tx.send(IncomingCommand::DreamGet).await;
+                                        }
+                                            other => {
+                                                warn!(command = %other, "ws_server.unknown_cmd");
+                                                let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
+                                            }
+                                        }
                                         } else {
                                             let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
                                         }
