@@ -30,6 +30,9 @@ pub enum IncomingCommand {
     DreamNow,
     DreamSet { cfg: JsonValue },
     DreamGet,
+    SyncNow,
+    SyncSet { cfg: JsonValue },
+    SyncGet,
     Raw(JsonValue),
 }
 

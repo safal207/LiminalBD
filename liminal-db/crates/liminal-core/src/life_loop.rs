@@ -6,6 +6,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::cluster_field::ClusterField;
 use crate::morph_mind::{analyze, hints as gather_hints};
+use crate::synchrony::{detect_sync_groups, run_collective_dream};
 use crate::types::{Hint, Metrics};
 use serde_json::json;
 
@@ -38,6 +39,19 @@ pub async fn run_loop<F, G, H>(
         slowed_once: false,
     };
 
+    struct SharedDreamState {
+        active: bool,
+        phase_until: u64,
+        last_phase_end: u64,
+        restore_tick: Option<u64>,
+    }
+    let mut shared_state = SharedDreamState {
+        active: false,
+        phase_until: 0,
+        last_phase_end: 0,
+        restore_tick: None,
+    };
+
     loop {
         if let Some(original) = dream_state.restore_tick {
             if dream_state.slowed_once {
@@ -52,6 +66,14 @@ pub async fn run_loop<F, G, H>(
         }
         let mut guard = field.lock().await;
         let mut events = guard.tick_all(tick_ms);
+
+        if shared_state.active && guard.now_ms >= shared_state.phase_until {
+            shared_state.active = false;
+            shared_state.last_phase_end = guard.now_ms;
+            if let Some(original) = shared_state.restore_tick.take() {
+                tick_ms = original;
+            }
+        }
 
         elapsed_since_metrics += tick_ms;
         elapsed_since_partial += tick_ms;
@@ -90,9 +112,7 @@ pub async fn run_loop<F, G, H>(
         }
         if let Some(metrics) = last_metrics.as_ref() {
             let cfg = guard.dream_config();
-            let idle_elapsed = guard
-                .now_ms
-                .saturating_sub(dream_state.last_start_ms);
+            let idle_elapsed = guard.now_ms.saturating_sub(dream_state.last_start_ms);
             if metrics.sleeping_pct > 0.6
                 && metrics.live_load < 0.4
                 && idle_elapsed > (cfg.min_idle_s as u64) * 1_000
@@ -131,6 +151,51 @@ pub async fn run_loop<F, G, H>(
                         })
                         .to_string(),
                     );
+                }
+            }
+            let sync_cfg = guard.sync_config();
+            if !shared_state.active {
+                let since_last_phase = guard.now_ms.saturating_sub(shared_state.last_phase_end);
+                let since_dream = guard.now_ms.saturating_sub(guard.last_dream_at());
+                if guard.last_dream_at() > 0
+                    && metrics.sleeping_pct > 0.65
+                    && since_dream <= 30_000
+                    && since_last_phase >= sync_cfg.phase_gap_ms as u64
+                {
+                    let groups = detect_sync_groups(&*guard, &sync_cfg, guard.now_ms);
+                    if !groups.is_empty() {
+                        let now_ms = guard.now_ms;
+                        let report = run_collective_dream(&mut *guard, &groups, &sync_cfg, now_ms);
+                        events.push(format!(
+                            "COLLECTIVE_DREAM groups={} shared={} aligned={} protected={} took={}ms",
+                            report.groups, report.shared, report.aligned, report.protected, report.took_ms
+                        ));
+                        events.push(
+                            json!({
+                                "ev": "collective_dream",
+                                "meta": {
+                                    "groups": report.groups,
+                                    "shared": report.shared,
+                                    "aligned": report.aligned,
+                                    "protected": report.protected,
+                                    "took_ms": report.took_ms
+                                }
+                            })
+                            .to_string(),
+                        );
+                        shared_state.active = true;
+                        shared_state.phase_until =
+                            guard.now_ms.saturating_add(sync_cfg.phase_len_ms as u64);
+                        let baseline = dream_state
+                            .restore_tick
+                            .unwrap_or(shared_state.restore_tick.unwrap_or(tick_ms));
+                        shared_state.restore_tick = Some(baseline);
+                        let mut slower = ((tick_ms as f32) * 1.1).round() as u64;
+                        if slower <= tick_ms {
+                            slower = tick_ms.saturating_add(5);
+                        }
+                        tick_ms = slower.clamp(80, 800);
+                    }
                 }
             }
         }

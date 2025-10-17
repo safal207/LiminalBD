@@ -8,9 +8,9 @@ use serde_json::json;
 
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
-    AffinityDelta, CellSnapshot, DivideDelta, DreamEdgeDelta, DreamLinkDelta,
-    DreamReportDelta, EnergyDelta, EventDelta, Journal, LinkDelta, StateDelta, TickDelta,
-    TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
+    AffinityDelta, CellSnapshot, CollectiveDreamReportDelta, DivideDelta, DreamEdgeDelta,
+    DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta, Journal, LinkDelta, StateDelta,
+    SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
     LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
@@ -20,6 +20,7 @@ use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
+use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
 use crate::views::{NodeHitStat, ViewFilter, ViewRegistry, ViewStats};
@@ -45,6 +46,8 @@ pub struct ClusterField {
     last_dream_ms: u64,
     dream_cfg: DreamConfig,
     dream_reports: VecDeque<(u64, DreamReport)>,
+    sync_cfg: SyncConfig,
+    sync_reports: VecDeque<(u64, SyncReport)>,
     pub trs: TrsState,
     harmony: HarmonyTuning,
     pub views: ViewRegistry,
@@ -124,6 +127,8 @@ impl ClusterField {
             last_dream_ms: 0,
             dream_cfg: DreamConfig::default(),
             dream_reports: VecDeque::new(),
+            sync_cfg: SyncConfig::default(),
+            sync_reports: VecDeque::new(),
             trs: TrsState::default(),
             harmony: HarmonyTuning::default(),
             views: ViewRegistry::new(),
@@ -165,6 +170,33 @@ impl ClusterField {
         let report = run_dream(self, &cfg, self.now_ms);
         self.last_dream_ms = self.now_ms;
         Some(report)
+    }
+
+    pub fn last_dream_at(&self) -> u64 {
+        self.last_dream_ms
+    }
+
+    pub fn sync_config(&self) -> SyncConfig {
+        self.sync_cfg.clone()
+    }
+
+    pub fn set_sync_config(&mut self, cfg: SyncConfig) {
+        let mut cfg = cfg;
+        cfg.weight_xfer = cfg.weight_xfer.clamp(0.05, 0.5);
+        self.sync_cfg = cfg.clone();
+        self.emit(EventDelta::SyncConfig(cfg));
+    }
+
+    pub fn last_sync_reports(&self, count: usize) -> Vec<(u64, SyncReport)> {
+        let mut collected: Vec<(u64, SyncReport)> = self
+            .sync_reports
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect();
+        collected.reverse();
+        collected
     }
 
     pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
@@ -738,7 +770,10 @@ impl ClusterField {
             }
         }
         self.register_link(id, target);
-        self.emit(EventDelta::Link(LinkDelta { from: id, to: target }));
+        self.emit(EventDelta::Link(LinkDelta {
+            from: id,
+            to: target,
+        }));
         self.emit_dream_rewire(id, target);
         Some(1)
     }
@@ -759,13 +794,7 @@ impl ClusterField {
         }));
     }
 
-    pub(crate) fn emit_dream_weaken(
-        &self,
-        from: NodeId,
-        to: NodeId,
-        freq: f32,
-        avg_strength: f32,
-    ) {
+    pub(crate) fn emit_dream_weaken(&self, from: NodeId, to: NodeId, freq: f32, avg_strength: f32) {
         self.emit(EventDelta::DreamWeaken(DreamEdgeDelta {
             from,
             to,
@@ -791,14 +820,162 @@ impl ClusterField {
         self.emit(EventDelta::DreamReport(DreamReportDelta { now_ms, report }));
     }
 
+    pub(crate) fn record_sync_report(&mut self, now_ms: u64, report: SyncReport) {
+        self.sync_reports.push_back((now_ms, report.clone()));
+        while self.sync_reports.len() > 16 {
+            self.sync_reports.pop_front();
+        }
+        self.emit(EventDelta::CollectiveDreamReport(
+            CollectiveDreamReportDelta { now_ms, report },
+        ));
+    }
+
+    pub fn community_centroid(&self, nodes: &[NodeId]) -> f32 {
+        if nodes.is_empty() {
+            return 0.0;
+        }
+        let mut total = 0.0f32;
+        let mut count = 0u32;
+        for node in nodes {
+            if let Some(cell) = self.cells.get(node) {
+                total += cell.affinity;
+                count = count.saturating_add(1);
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            total / (count as f32)
+        }
+    }
+
+    pub(crate) fn sync_top_tokens(&self, nodes: &[NodeId], top_k: usize) -> Vec<String> {
+        if nodes.is_empty() || top_k == 0 {
+            return Vec::new();
+        }
+        let focus: HashSet<NodeId> = nodes.iter().copied().collect();
+        let mut scores: HashMap<String, f32> = HashMap::new();
+        for (token, history) in &self.recent_routes {
+            let mut total = 0.0f32;
+            let mut hits = 0u32;
+            for entry in history.iter().rev().take(64) {
+                if focus.contains(&entry.node) {
+                    total += entry.strength;
+                    hits = hits.saturating_add(1);
+                }
+            }
+            if hits > 0 {
+                let score = total + hits as f32 * 0.25;
+                scores.insert(token.clone(), score);
+            }
+        }
+        let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        let mut selected: Vec<String> = ranked
+            .into_iter()
+            .take(top_k)
+            .map(|(token, _)| token)
+            .collect();
+        if selected.is_empty() {
+            let mut fallback: HashMap<String, u32> = HashMap::new();
+            for node in nodes {
+                if let Some(cell) = self.cells.get(node) {
+                    for token in tokenize(&cell.seed.core_pattern) {
+                        *fallback.entry(token).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut ranked_tokens: Vec<(String, u32)> = fallback.into_iter().collect();
+            ranked_tokens.sort_by(|a, b| b.1.cmp(&a.1));
+            selected = ranked_tokens
+                .into_iter()
+                .take(top_k)
+                .map(|(token, _)| token)
+                .collect();
+        }
+        selected
+    }
+
+    pub(crate) fn share_tokens(
+        &mut self,
+        nodes: &[NodeId],
+        tokens: &[String],
+        weight_xfer: f32,
+    ) -> (u32, u32, u32) {
+        if nodes.is_empty() || tokens.is_empty() {
+            return (0, 0, 0);
+        }
+        let norm_weight = weight_xfer.clamp(0.05, 0.5);
+        let centroid = self.community_centroid(nodes);
+        let normalized_tokens: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+        let mut shared = 0u32;
+        let mut aligned = 0u32;
+        let mut protected = 0u32;
+        let mut share_events: Vec<(NodeId, String, f32)> = Vec::new();
+        for &node in nodes {
+            let node_protected;
+            {
+                let Some(cell) = self.cells.get_mut(&node) else {
+                    continue;
+                };
+                node_protected = cell.salience >= 0.6 || cell.adreno_tag;
+                let diff = centroid - cell.affinity;
+                if diff.abs() > 0.002 {
+                    cell.affinity = (cell.affinity + diff * 0.08).clamp(0.0, 1.0);
+                    aligned = aligned.saturating_add(1);
+                }
+                if !node_protected {
+                    let adjust = if diff < 0.0 {
+                        1.0 - norm_weight * 0.05
+                    } else {
+                        1.0 + norm_weight * 0.05
+                    };
+                    cell.metabolism = (cell.metabolism * adjust).clamp(0.05, 5.0);
+                }
+            }
+            if node_protected {
+                protected = protected.saturating_add(1);
+            }
+            for token in &normalized_tokens {
+                let entry = self.route_bias.entry((token.clone(), node)).or_insert(1.0);
+                let updated = (*entry + norm_weight).clamp(0.2, 5.0);
+                if (updated - *entry).abs() > f32::EPSILON {
+                    *entry = updated;
+                    shared = shared.saturating_add(1);
+                    share_events.push((node, token.clone(), updated));
+                }
+            }
+        }
+        for (idx, &from) in nodes.iter().enumerate() {
+            for &to in nodes.iter().skip(idx + 1) {
+                if self.adjust_link_score(from, to, norm_weight) {
+                    aligned = aligned.saturating_add(1);
+                    let score = self.link_score(from, to);
+                    self.emit(EventDelta::SyncAlign(SyncAlignDelta { from, to, score }));
+                }
+                if self.adjust_link_score(to, from, norm_weight) {
+                    aligned = aligned.saturating_add(1);
+                    let score = self.link_score(to, from);
+                    self.emit(EventDelta::SyncAlign(SyncAlignDelta {
+                        from: to,
+                        to: from,
+                        score,
+                    }));
+                }
+            }
+        }
+        for (node, token, bias) in share_events {
+            self.emit(EventDelta::SyncShare(SyncShareDelta { node, token, bias }));
+        }
+        (shared, aligned, protected)
+    }
+
     pub(crate) fn collect_recent_pairs(&self, window_ms: u32) -> Vec<PairStat> {
         let cutoff = self.now_ms.saturating_sub(window_ms as u64);
         let mut accum: HashMap<(NodeId, NodeId), (u32, f32)> = HashMap::new();
         for history in self.recent_routes.values() {
-            let relevant: Vec<&RecentRoute> = history
-                .iter()
-                .filter(|entry| entry.ts >= cutoff)
-                .collect();
+            let relevant: Vec<&RecentRoute> =
+                history.iter().filter(|entry| entry.ts >= cutoff).collect();
             if relevant.len() < 2 {
                 continue;
             }
@@ -835,7 +1012,6 @@ impl ClusterField {
             })
             .collect()
     }
-
 
     fn rebuild_index(&mut self) {
         self.index.clear();
@@ -1593,13 +1769,14 @@ impl ClusterField {
             EventDelta::DreamConfig(cfg) => {
                 self.dream_cfg = cfg.clone();
             }
+            EventDelta::SyncConfig(cfg) => {
+                self.sync_cfg = cfg.clone();
+            }
             EventDelta::DreamStrengthen(delta) => {
-                self.link_scores
-                    .insert((delta.from, delta.to), delta.score);
+                self.link_scores.insert((delta.from, delta.to), delta.score);
             }
             EventDelta::DreamWeaken(delta) => {
-                self.link_scores
-                    .insert((delta.from, delta.to), delta.score);
+                self.link_scores.insert((delta.from, delta.to), delta.score);
             }
             EventDelta::DreamPrune(delta) => {
                 if let Some(cell) = self.cells.get_mut(&delta.from) {
@@ -1621,6 +1798,20 @@ impl ClusterField {
                     self.dream_reports.pop_front();
                 }
                 self.last_dream_ms = delta.now_ms;
+            }
+            EventDelta::SyncShare(delta) => {
+                self.route_bias
+                    .insert((delta.token.to_lowercase(), delta.node), delta.bias);
+            }
+            EventDelta::SyncAlign(delta) => {
+                self.link_scores.insert((delta.from, delta.to), delta.score);
+            }
+            EventDelta::CollectiveDreamReport(delta) => {
+                self.sync_reports
+                    .push_back((delta.now_ms, delta.report.clone()));
+                while self.sync_reports.len() > 16 {
+                    self.sync_reports.pop_front();
+                }
             }
         }
     }
@@ -1674,6 +1865,8 @@ mod tests {
     use crate::types::Hint;
     use serde_json::Value;
 
+    use crate::synchrony::{detect_sync_groups, SyncConfig};
+
     #[test]
     fn reflex_fire_on_window_threshold() {
         let mut field = ClusterField::new();
@@ -1712,92 +1905,154 @@ mod tests {
                     logs.iter().any(|log| log.contains("REFLEX_FIRE")),
                     "reflex should fire on fifth impulse"
                 );
+            }
+        }
+
+        #[test]
+        fn detect_sync_groups_forms_clusters() {
+            let mut field = ClusterField::new();
+            let a1 = field.add_root("liminal/a1");
+            let a2 = field.add_root("liminal/a2");
+            let b1 = field.add_root("liminal/b1");
+            let b2 = field.add_root("liminal/b2");
+            field.now_ms = 1_000;
+            field.record_route_sequence(&[a1, a2, a1]);
+            field.record_route_sequence(&[b1, b2, b1]);
+            field.record_route_sequence(&[a1, a2]);
+            field.record_route_sequence(&[b1, b2]);
+
+            let mut cfg = SyncConfig::default();
+            cfg.cooccur_threshold = 0.1;
+            cfg.max_groups = 4;
+            cfg.share_top_k = 2;
+            let groups = detect_sync_groups(&field, &cfg, field.now_ms);
+            assert!(
+                groups.len() >= 2,
+                "expected at least two groups, got {:?}",
+                groups
+            );
+            assert!(groups
+                .iter()
+                .any(|g| g.nodes.contains(&a1) && g.nodes.contains(&a2)));
+            assert!(groups
+                .iter()
+                .any(|g| g.nodes.contains(&b1) && g.nodes.contains(&b2)));
+        }
+
+        #[test]
+        fn share_tokens_updates_bias_and_protects_salient() {
+            let mut field = ClusterField::new();
+            let a = field.add_root("liminal/share_a");
+            let b = field.add_root("liminal/share_b");
+            field.now_ms = 5_000;
+            if let Some(cell) = field.cells.get_mut(&a) {
+                cell.links.insert(b);
+            }
+            field.register_link(a, b);
+            if let Some(cell) = field.cells.get_mut(&b) {
+                cell.links.insert(a);
+                cell.salience = 0.7;
+            }
+            field.register_link(b, a);
+
+            let (shared, aligned, protected) =
+                field.share_tokens(&[a, b], &["sync/test".into()], 0.2);
+            assert!(shared >= 2);
+            assert!(aligned > 0);
+            assert!(protected >= 1);
+            let bias_a = field
+                .route_bias
+                .get(&("sync/test".to_string(), a))
+                .cloned()
+                .unwrap_or(0.0);
+            assert!(bias_a >= 1.0 && bias_a <= 5.0);
+            let score = field.link_score(a, b);
+            assert!(score >= 0.2 && score <= 3.0);
+        }
+
+        #[test]
+        fn dream_recent_pairs_counts() {
+            let mut field = ClusterField::new();
+            field.now_ms = 10_000;
+            let token = "unit".to_string();
+            let history = field.recent_routes.entry(token).or_default();
+            history.push_back(RecentRoute {
+                ts: 9_900,
+                node: 1,
+                strength: 0.6,
+            });
+            history.push_back(RecentRoute {
+                ts: 9_905,
+                node: 2,
+                strength: 0.8,
+            });
+            history.push_back(RecentRoute {
+                ts: 9_910,
+                node: 1,
+                strength: 0.7,
+            });
+            let pairs = field.collect_recent_pairs(200);
+            assert_eq!(pairs.len(), 1, "exactly one pair should be recorded");
+            let stat = &pairs[0];
+            assert_eq!(stat.u, 1);
+            assert_eq!(stat.v, 2);
+            assert_eq!(stat.freq, 2.0);
+            assert!((stat.avg_strength - 0.7).abs() < 1e-6);
+        }
+
+        #[test]
+        fn dream_adjusts_and_prunes_links() {
+            let mut field = ClusterField::new();
+            let a = field.add_root("liminal/a");
+            let b = field.add_root("liminal/b");
+            {
+                let cell = field.cells.get_mut(&a).unwrap();
+                cell.links.insert(b);
+            }
+            field.register_link(a, b);
+            assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
+            assert!(field.adjust_link_score(a, b, 0.5));
+            assert!(field.link_score(a, b) > 1.0);
+            assert!(field.adjust_link_score(a, b, 5.0));
+            assert!((field.link_score(a, b) - 3.0).abs() < f32::EPSILON);
+            assert!(field.prune_link(a, b));
+            assert_eq!(field.link_scores.get(&(a, b)), None);
+        }
+
+        #[test]
+        fn dream_respects_protected_nodes() {
+            let mut field = ClusterField::new();
+            let a = field.add_root("liminal/a");
+            let b = field.add_root("liminal/b");
+            {
+                let cell = field.cells.get_mut(&a).unwrap();
+                cell.links.insert(b);
+                cell.salience = 0.9;
+            }
+            field.register_link(a, b);
+            let history = field.recent_routes.entry("dream".into()).or_default();
+            field.now_ms = 5_000;
+            history.push_back(RecentRoute {
+                ts: 4_900,
+                node: a,
+                strength: 0.6,
+            });
+            history.push_back(RecentRoute {
+                ts: 4_905,
+                node: b,
+                strength: 0.6,
+            });
+            let cfg = DreamConfig {
+                protect_salience: 0.6,
+                max_ops_per_cycle: 10,
+                ..DreamConfig::default()
+            };
+            let now = field.now_ms;
+            let report = run_dream(&mut field, &cfg, now);
+            assert!(report.protected > 0, "protected counter should increase");
+            assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
         }
     }
-
-    #[test]
-    fn dream_recent_pairs_counts() {
-        let mut field = ClusterField::new();
-        field.now_ms = 10_000;
-        let token = "unit".to_string();
-        let history = field.recent_routes.entry(token).or_default();
-        history.push_back(RecentRoute {
-            ts: 9_900,
-            node: 1,
-            strength: 0.6,
-        });
-        history.push_back(RecentRoute {
-            ts: 9_905,
-            node: 2,
-            strength: 0.8,
-        });
-        history.push_back(RecentRoute {
-            ts: 9_910,
-            node: 1,
-            strength: 0.7,
-        });
-        let pairs = field.collect_recent_pairs(200);
-        assert_eq!(pairs.len(), 1, "exactly one pair should be recorded");
-        let stat = &pairs[0];
-        assert_eq!(stat.u, 1);
-        assert_eq!(stat.v, 2);
-        assert_eq!(stat.freq, 2.0);
-        assert!((stat.avg_strength - 0.7).abs() < 1e-6);
-    }
-
-    #[test]
-    fn dream_adjusts_and_prunes_links() {
-        let mut field = ClusterField::new();
-        let a = field.add_root("liminal/a");
-        let b = field.add_root("liminal/b");
-        {
-            let cell = field.cells.get_mut(&a).unwrap();
-            cell.links.insert(b);
-        }
-        field.register_link(a, b);
-        assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
-        assert!(field.adjust_link_score(a, b, 0.5));
-        assert!(field.link_score(a, b) > 1.0);
-        assert!(field.adjust_link_score(a, b, 5.0));
-        assert!((field.link_score(a, b) - 3.0).abs() < f32::EPSILON);
-        assert!(field.prune_link(a, b));
-        assert_eq!(field.link_scores.get(&(a, b)), None);
-    }
-
-    #[test]
-    fn dream_respects_protected_nodes() {
-        let mut field = ClusterField::new();
-        let a = field.add_root("liminal/a");
-        let b = field.add_root("liminal/b");
-        {
-            let cell = field.cells.get_mut(&a).unwrap();
-            cell.links.insert(b);
-            cell.salience = 0.9;
-        }
-        field.register_link(a, b);
-        let history = field.recent_routes.entry("dream".into()).or_default();
-        field.now_ms = 5_000;
-        history.push_back(RecentRoute {
-            ts: 4_900,
-            node: a,
-            strength: 0.6,
-        });
-        history.push_back(RecentRoute {
-            ts: 4_905,
-            node: b,
-            strength: 0.6,
-        });
-        let cfg = DreamConfig {
-            protect_salience: 0.6,
-            max_ops_per_cycle: 10,
-            ..DreamConfig::default()
-        };
-        let now = field.now_ms;
-        let report = run_dream(&mut field, &cfg, now);
-        assert!(report.protected > 0, "protected counter should increase");
-        assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
-    }
-}
 
     #[test]
     fn remove_reflex_disables_rule() {
@@ -1854,10 +2109,7 @@ mod tests {
 
         field.now_ms = 20_000;
         {
-            let history = field
-                .recent_routes
-                .entry("dream/high".into())
-                .or_default();
+            let history = field.recent_routes.entry("dream/high".into()).or_default();
             let base = field.now_ms - 400;
             for offset in [0_u64, 30, 60, 90] {
                 history.push_back(RecentRoute {
@@ -1873,10 +2125,7 @@ mod tests {
             }
         }
         {
-            let history = field
-                .recent_routes
-                .entry("dream/low".into())
-                .or_default();
+            let history = field.recent_routes.entry("dream/low".into()).or_default();
             let base = field.now_ms - 200;
             history.push_back(RecentRoute {
                 ts: base,
