@@ -1,3 +1,4 @@
+pub mod awakening;
 pub mod cluster_field;
 pub mod dream_engine;
 pub mod journal;
@@ -6,6 +7,7 @@ pub mod lql;
 pub mod morph_mind;
 pub mod node_cell;
 pub mod reflex;
+pub mod resonant;
 pub mod security;
 pub mod seed;
 pub mod symmetry;
@@ -14,9 +16,8 @@ pub mod trs;
 pub mod types;
 pub mod views;
 
-pub use cluster_field::{
-    ClusterField, FieldEvents, ResonantEdge, ResonantInfluence, ResonantModel, ResonantTension,
-};
+pub use awakening::{AwakeningConfig, AwakeningReport};
+pub use cluster_field::{ClusterField, FieldEvents};
 pub use dream_engine::{DreamConfig, DreamReport};
 pub use journal::{CellSnapshot, EventDelta, Journal};
 pub use life_loop::run_loop;
@@ -27,6 +28,9 @@ pub use lql::{
 pub use morph_mind::{analyze, hints};
 pub use node_cell::NodeCell;
 pub use reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule, ReflexWhen};
+pub use resonant::{
+    build_model, Influence, ResonantEdge, ResonantModel, SyncEvent, SyncLog, Tension,
+};
 pub use security::{hash_secret, Access, AccessError, ApiKey, NsId, Quotas, Role, TokenBucket};
 pub use seed::{create_seed, SeedParams};
 pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop, SymmetryStatus};
