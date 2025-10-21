@@ -1,150 +1,173 @@
 use serde::{Deserialize, Serialize};
 
-pub const RESONANT_SNAPSHOT_LIMIT: usize = 16;
-pub const SYNCLOG_SNAPSHOT_LIMIT: usize = 64;
+use crate::cluster_field::ClusterField;
+use crate::resonant::{ResonantModel, Tension};
+use crate::trs::TrsState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AwakeningConfig {
-    pub enabled: bool,
-    pub resonance_threshold: f32,
-    pub max_nodes: u32,
+    pub max_nodes: usize,
+    pub energy_floor: f32,
+    pub energy_boost: f32,
+    pub salience_boost: f32,
+    pub protect_salience: f32,
+    pub tick_bias_ms: i32,
+    pub target_gain: f32,
 }
 
 impl Default for AwakeningConfig {
     fn default() -> Self {
         AwakeningConfig {
-            enabled: false,
-            resonance_threshold: 0.5,
-            max_nodes: 64,
+            max_nodes: 4,
+            energy_floor: 0.45,
+            energy_boost: 0.35,
+            salience_boost: 0.12,
+            protect_salience: 0.75,
+            tick_bias_ms: 18,
+            target_gain: 0.08,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ModelFrame {
-    pub hash: String,
-    pub cell_count: u32,
-    pub created_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ResonantModel {
-    frames: Vec<ModelFrame>,
-    last_applied: Option<String>,
+pub struct AwakeningReport {
+    pub applied: u32,
+    pub protected: u32,
+    pub tick_adjust_ms: i32,
+    pub avg_tension: f32,
+    pub energy_delta: f32,
 }
 
-impl ResonantModel {
-    pub const MAX_FRAMES: usize = 64;
-
-    pub fn frames(&self) -> &[ModelFrame] {
-        &self.frames
+pub fn awaken(
+    field: &mut ClusterField,
+    model: &ResonantModel,
+    cfg: &AwakeningConfig,
+    trs: &mut TrsState,
+) -> AwakeningReport {
+    if model.tensions.is_empty() {
+        return AwakeningReport::default();
     }
 
-    pub fn last_hash(&self) -> Option<&str> {
-        self.frames.last().map(|frame| frame.hash.as_str())
-    }
+    let mut report = AwakeningReport::default();
+    let mut total_tension = 0.0f32;
+    let mut counted = 0u32;
+    let mut energy_delta = 0.0f32;
 
-    pub fn last_applied(&self) -> Option<&str> {
-        self.last_applied.as_deref()
-    }
+    let mut consider: Vec<&Tension> = model.tensions.iter().collect();
+    consider.sort_by(|a, b| {
+        b.magnitude
+            .partial_cmp(&a.magnitude)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    pub fn record_build(&mut self, frame: ModelFrame) {
-        self.frames.push(frame);
-        self.enforce_limit();
-    }
-
-    pub fn set_last_applied(&mut self, hash: Option<String>) {
-        self.last_applied = hash;
-    }
-
-    pub fn truncated(&self, limit: usize) -> Self {
-        if self.frames.len() <= limit {
-            return self.clone();
+    for tension in consider.into_iter().take(cfg.max_nodes) {
+        counted = counted.saturating_add(1);
+        total_tension += tension.magnitude;
+        let Some(cell_view) = field.cells.get(&tension.node) else {
+            continue;
+        };
+        if cell_view.salience >= cfg.protect_salience {
+            report.protected = report.protected.saturating_add(1);
+            continue;
         }
-        let mut clone = self.clone();
-        let keep_start = clone.frames.len().saturating_sub(limit);
-        clone.frames = clone.frames.split_off(keep_start);
-        clone
-    }
-
-    fn enforce_limit(&mut self) {
-        if self.frames.len() > Self::MAX_FRAMES {
-            let excess = self.frames.len() - Self::MAX_FRAMES;
-            self.frames.drain(0..excess);
+        let mut delta = 0.0f32;
+        {
+            let Some(cell) = field.cells.get_mut(&tension.node) else {
+                continue;
+            };
+            let before = cell.energy;
+            let floor = cfg.energy_floor.max(before);
+            let boost = (tension.magnitude * cfg.energy_boost).min(1.0 - floor);
+            let after = (floor + boost).clamp(0.0, 1.0);
+            if (after - before).abs() > f32::EPSILON {
+                cell.energy = after;
+                cell.bump_salience(cfg.salience_boost * (1.0 + tension.magnitude));
+                delta = after - before;
+            }
+        }
+        if delta.abs() > f32::EPSILON {
+            energy_delta += delta;
+            report.applied = report.applied.saturating_add(1);
+            field.emit_energy_state(tension.node);
         }
     }
+
+    if counted > 0 {
+        report.avg_tension = total_tension / counted as f32;
+    }
+
+    report.energy_delta = energy_delta;
+
+    let tension_delta = report.avg_tension - 0.5;
+    if cfg.tick_bias_ms != 0 {
+        let adjust = ((cfg.tick_bias_ms as f32) * tension_delta)
+            .round()
+            .clamp(-64.0, 64.0) as i32;
+        report.tick_adjust_ms = adjust;
+    }
+
+    if cfg.target_gain > 0.0 {
+        let delta = (cfg.target_gain * tension_delta).clamp(-0.15, 0.15);
+        let next_target = (trs.target_load + delta).clamp(0.3, 0.95);
+        trs.set_target(next_target);
+    }
+
+    report
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum SyncAction {
-    Build,
-    Apply,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster_field::ClusterField;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SyncEntry {
-    pub hash: String,
-    pub action: SyncAction,
-    pub now_ms: u64,
-    pub cell_count: u32,
-}
+    #[test]
+    fn awaken_elevates_low_energy_and_respects_protection() {
+        let mut field = ClusterField::new();
+        let low = field.add_root("low");
+        let protected = field.add_root("protected");
+        field.cells.get_mut(&low).unwrap().energy = 0.2;
+        field.cells.get_mut(&low).unwrap().salience = 0.4;
+        field.cells.get_mut(&protected).unwrap().energy = 0.55;
+        field.cells.get_mut(&protected).unwrap().salience = 0.8;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct SyncLog {
-    entries: Vec<SyncEntry>,
-    #[serde(default)]
-    last_tick_ms: u64,
-}
+        let model = ResonantModel {
+            edges: Vec::new(),
+            influences: Vec::new(),
+            tensions: vec![
+                Tension {
+                    node: low,
+                    magnitude: 0.9,
+                    relief: 0.2,
+                },
+                Tension {
+                    node: protected,
+                    magnitude: 0.7,
+                    relief: 0.2,
+                },
+            ],
+            coherence: 0.6,
+        };
 
-impl SyncLog {
-    pub const MAX_ENTRIES: usize = 256;
+        let cfg = AwakeningConfig {
+            max_nodes: 3,
+            energy_floor: 0.5,
+            energy_boost: 0.4,
+            salience_boost: 0.2,
+            protect_salience: 0.7,
+            tick_bias_ms: 20,
+            target_gain: 0.1,
+        };
 
-    pub fn entries(&self) -> &[SyncEntry] {
-        &self.entries
-    }
+        let mut trs = TrsState::default();
+        let report = awaken(&mut field, &model, &cfg, &mut trs);
 
-    pub fn last_tick_ms(&self) -> u64 {
-        self.last_tick_ms
-    }
-
-    pub fn record_build(&mut self, hash: String, now_ms: u64, cell_count: u32) {
-        self.entries.push(SyncEntry {
-            hash,
-            action: SyncAction::Build,
-            now_ms,
-            cell_count,
-        });
-        self.enforce_limit();
-    }
-
-    pub fn record_apply(&mut self, hash: String, now_ms: u64, cell_count: u32) {
-        self.entries.push(SyncEntry {
-            hash,
-            action: SyncAction::Apply,
-            now_ms,
-            cell_count,
-        });
-        self.enforce_limit();
-    }
-
-    pub fn record_tick(&mut self, now_ms: u64) {
-        self.last_tick_ms = now_ms;
-    }
-
-    pub fn truncated(&self, limit: usize) -> Self {
-        if self.entries.len() <= limit {
-            return self.clone();
-        }
-        let mut clone = self.clone();
-        let keep_start = clone.entries.len().saturating_sub(limit);
-        clone.entries = clone.entries.split_off(keep_start);
-        clone
-    }
-
-    fn enforce_limit(&mut self) {
-        if self.entries.len() > Self::MAX_ENTRIES {
-            let excess = self.entries.len() - Self::MAX_ENTRIES;
-            self.entries.drain(0..excess);
-        }
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.protected, 1);
+        assert!(report.avg_tension > 0.0);
+        assert!(field.cells.get(&low).unwrap().energy >= cfg.energy_floor);
+        assert_eq!(field.cells.get(&protected).unwrap().energy, 0.55);
+        assert!(field.cells.get(&low).unwrap().salience > 0.4);
+        assert!(report.tick_adjust_ms != 0);
+        assert!((trs.target_load - 0.6).abs() > f32::EPSILON);
     }
 }

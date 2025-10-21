@@ -7,7 +7,7 @@ use rand::Rng;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::awakening::{AwakeningConfig, ModelFrame, ResonantModel, SyncLog};
+use crate::awakening::AwakeningConfig;
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
     AffinityDelta, AwakenApplyDelta, AwakenTickDelta, CellSnapshot, CollectiveDreamReportDelta,
@@ -21,6 +21,7 @@ use crate::lql::{
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
+use crate::resonant::{ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -51,6 +52,9 @@ pub struct ClusterField {
     dream_reports: VecDeque<(u64, DreamReport)>,
     sync_cfg: SyncConfig,
     sync_reports: VecDeque<(u64, SyncReport)>,
+    resonant_model: Option<ResonantModel>,
+    awakening_cfg: AwakeningConfig,
+    sync_log: SyncLog,
     pub trs: TrsState,
     awakening_cfg: AwakeningConfig,
     resonant_model: ResonantModel,
@@ -63,6 +67,7 @@ pub struct ClusterField {
     reflex_engine: ReflexEngine,
     important_cells: HashSet<NodeId>,
     noradrenaline: Option<NoradrenalineEffect>,
+    pub resonant_model: ResonantModel,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +107,61 @@ struct NoradrenalineEffect {
     strength: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct ResonantModel {
+    #[serde(default)]
+    pub edges: Vec<ResonantEdge>,
+    #[serde(default)]
+    pub influences: Vec<ResonantInfluence>,
+    #[serde(default)]
+    pub tensions: Vec<ResonantTension>,
+}
+
+impl ResonantModel {
+    pub fn top_edges(&self, limit: usize) -> Vec<ResonantEdge> {
+        take_top(&self.edges, limit)
+    }
+
+    pub fn top_influences(&self, limit: usize) -> Vec<ResonantInfluence> {
+        take_top(&self.influences, limit)
+    }
+
+    pub fn top_tensions(&self, limit: usize) -> Vec<ResonantTension> {
+        take_top(&self.tensions, limit)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantInfluence {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub impact: f32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ResonantTension {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub tension: f32,
+}
+
+fn take_top<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    if limit == 0 {
+        Vec::new()
+    } else {
+        items.iter().take(limit).cloned().collect()
+    }
+}
+
+const DEFAULT_INTROSPECT_TOP_N: usize = 10;
+
 impl Default for HarmonyTuning {
     fn default() -> Self {
         HarmonyTuning {
@@ -136,6 +196,9 @@ impl ClusterField {
             dream_reports: VecDeque::new(),
             sync_cfg: SyncConfig::default(),
             sync_reports: VecDeque::new(),
+            resonant_model: None,
+            awakening_cfg: AwakeningConfig::default(),
+            sync_log: SyncLog::new(),
             trs: TrsState::default(),
             awakening_cfg: AwakeningConfig::default(),
             resonant_model: ResonantModel::default(),
@@ -148,6 +211,7 @@ impl ClusterField {
             reflex_engine: ReflexEngine::new(2_000),
             important_cells: HashSet::new(),
             noradrenaline: None,
+            resonant_model: ResonantModel::default(),
         }
     }
 
@@ -309,6 +373,30 @@ impl ClusterField {
             .collect();
         collected.reverse();
         collected
+    }
+
+    pub fn resonant_model(&self) -> Option<&ResonantModel> {
+        self.resonant_model.as_ref()
+    }
+
+    pub fn set_resonant_model(&mut self, model: ResonantModel) {
+        self.resonant_model = Some(model);
+    }
+
+    pub fn clear_resonant_model(&mut self) {
+        self.resonant_model = None;
+    }
+
+    pub fn awakening_config(&self) -> AwakeningConfig {
+        self.awakening_cfg.clone()
+    }
+
+    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
+        self.awakening_cfg = cfg;
+    }
+
+    pub fn sync_log(&self) -> &SyncLog {
+        &self.sync_log
     }
 
     pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
@@ -594,6 +682,60 @@ impl ClusterField {
                 .to_string();
                 Ok(LqlExecResult {
                     response: Some(LqlResponse::Subscribe(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectModel { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let edges = self.resonant_model.top_edges(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_model": {
+                            "limit": limit,
+                            "edges": edges,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectInfluence { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let influences = self.resonant_model.top_influences(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_influence": {
+                            "limit": limit,
+                            "influences": influences,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectTension { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let tensions = self.resonant_model.top_tensions(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_tension": {
+                            "limit": limit,
+                            "tensions": tensions,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
                     events: vec![event],
                 })
             }
@@ -906,6 +1048,18 @@ impl ClusterField {
         }));
     }
 
+    pub(crate) fn emit_energy_state(&self, id: NodeId) {
+        if let Some(cell) = self.cells.get(&id) {
+            self.emit(EventDelta::Energy(EnergyDelta {
+                id,
+                energy: cell.energy,
+                metabolism: cell.metabolism,
+                state: cell.state,
+                last_response_ms: cell.last_response_ms,
+            }));
+        }
+    }
+
     pub(crate) fn emit_dream_weaken(&self, from: NodeId, to: NodeId, freq: f32, avg_strength: f32) {
         self.emit(EventDelta::DreamWeaken(DreamEdgeDelta {
             from,
@@ -925,6 +1079,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_dream_report(&mut self, now_ms: u64, report: DreamReport) {
+        self.sync_log.record_dream(now_ms, &report);
         self.dream_reports.push_back((now_ms, report.clone()));
         while self.dream_reports.len() > 16 {
             self.dream_reports.pop_front();
@@ -933,6 +1088,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_sync_report(&mut self, now_ms: u64, report: SyncReport) {
+        self.sync_log.record_collective(now_ms, &report);
         self.sync_reports.push_back((now_ms, report.clone()));
         while self.sync_reports.len() > 16 {
             self.sync_reports.pop_front();
@@ -2192,6 +2348,94 @@ mod tests {
             assert!(report.protected > 0, "protected counter should increase");
             assert!((field.link_score(a, b) - 1.0).abs() < f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn introspect_model_emits_edges() {
+        let mut field = ClusterField::new();
+        field.resonant_model.edges = vec![
+            ResonantEdge {
+                from: 1,
+                to: 2,
+                weight: 0.92,
+            },
+            ResonantEdge {
+                from: 3,
+                to: 4,
+                weight: 0.75,
+            },
+        ];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectModel { top_n: Some(1) })
+            .expect("introspect model");
+        assert!(
+            exec.response.is_none(),
+            "introspect should not return response"
+        );
+        assert_eq!(exec.events.len(), 1, "expected single event");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        assert_eq!(payload["ev"], "lql");
+        let edges = payload["meta"]["introspect_model"]["edges"]
+            .as_array()
+            .expect("edges array");
+        assert_eq!(edges.len(), 1, "top_n should limit edges");
+        assert_eq!(edges[0]["from"].as_u64(), Some(1));
+        assert_eq!(
+            payload["meta"]["introspect_model"]["limit"].as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn introspect_influence_defaults_limit() {
+        let mut field = ClusterField::new();
+        field.resonant_model.influences = vec![ResonantInfluence {
+            source: 5,
+            target: 6,
+            impact: 0.66,
+        }];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectInfluence { top_n: None })
+            .expect("introspect influence");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        assert_eq!(payload["ev"], "lql");
+        assert_eq!(
+            payload["meta"]["introspect_influence"]["limit"].as_u64(),
+            Some(super::DEFAULT_INTROSPECT_TOP_N as u64)
+        );
+        let influences = payload["meta"]["introspect_influence"]["influences"]
+            .as_array()
+            .expect("influences array");
+        assert_eq!(influences.len(), 1);
+        assert_eq!(influences[0]["source"].as_u64(), Some(5));
+        assert_eq!(influences[0]["target"].as_u64(), Some(6));
+    }
+
+    #[test]
+    fn introspect_tension_truncates() {
+        let mut field = ClusterField::new();
+        field.resonant_model.tensions = vec![
+            ResonantTension {
+                from: 8,
+                to: 9,
+                tension: 0.55,
+            },
+            ResonantTension {
+                from: 10,
+                to: 11,
+                tension: 0.52,
+            },
+        ];
+        let exec = field
+            .exec_lql(LqlAst::IntrospectTension { top_n: Some(2) })
+            .expect("introspect tension");
+        let payload: Value = serde_json::from_str(&exec.events[0]).expect("valid json");
+        let tensions = payload["meta"]["introspect_tension"]["tensions"]
+            .as_array()
+            .expect("tensions array");
+        assert_eq!(tensions.len(), 2);
+        assert_eq!(tensions[0]["from"].as_u64(), Some(8));
+        assert_eq!(tensions[1]["to"].as_u64(), Some(11));
     }
 
     #[test]
