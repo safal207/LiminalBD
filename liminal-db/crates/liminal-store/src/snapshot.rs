@@ -1,6 +1,7 @@
 use anyhow::Result;
 use liminal_core::{
-    CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, SeedParams, SyncConfig, TrsState,
+    AwakeningConfig, CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, ResonantModel,
+    SeedParams, SyncConfig, SyncLog, TrsState, RESONANT_SNAPSHOT_LIMIT, SYNCLOG_SNAPSHOT_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,14 @@ struct SnapshotEnvelope {
     dream: Option<DreamConfig>,
     #[serde(default)]
     sync: Option<SyncConfig>,
+    #[serde(default)]
+    awakening: Option<AwakeningConfig>,
+    #[serde(default)]
+    resonant: Option<ResonantModel>,
+    #[serde(default)]
+    sync_log: Option<SyncLog>,
+    #[serde(default)]
+    last_awaken_tick: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +40,10 @@ pub struct ClusterFieldSeed {
     pub trs: TrsState,
     pub dream: DreamConfig,
     pub sync: SyncConfig,
+    pub awakening: AwakeningConfig,
+    pub resonant: ResonantModel,
+    pub sync_log: SyncLog,
+    pub last_awaken_tick: u64,
 }
 
 impl ClusterFieldSeed {
@@ -59,6 +72,12 @@ impl ClusterFieldSeed {
         field.trs = self.trs.clone();
         field.set_dream_config(self.dream.clone());
         field.set_sync_config(self.sync.clone());
+        field.restore_awakening_state(
+            self.awakening,
+            self.resonant,
+            self.sync_log,
+            self.last_awaken_tick,
+        );
         field.rebuild_caches();
         field
     }
@@ -79,6 +98,10 @@ pub fn create_snapshot(cluster: &ClusterField) -> Result<Vec<u8>> {
         trs: Some(cluster.trs.clone()),
         dream: Some(cluster.dream_config()),
         sync: Some(cluster.sync_config()),
+        awakening: Some(cluster.awakening_config()),
+        resonant: Some(cluster.resonant_model().truncated(RESONANT_SNAPSHOT_LIMIT)),
+        sync_log: Some(cluster.sync_log().truncated(SYNCLOG_SNAPSHOT_LIMIT)),
+        last_awaken_tick: cluster.last_awaken_tick(),
     };
     Ok(serde_cbor::to_vec(&envelope)?)
 }
@@ -94,6 +117,10 @@ pub fn load_snapshot(bytes: &[u8]) -> Result<ClusterFieldSeed> {
         trs: envelope.trs.unwrap_or_default(),
         dream: envelope.dream.unwrap_or_default(),
         sync: envelope.sync.unwrap_or_default(),
+        awakening: envelope.awakening.unwrap_or_default(),
+        resonant: envelope.resonant.unwrap_or_default(),
+        sync_log: envelope.sync_log.unwrap_or_default(),
+        last_awaken_tick: envelope.last_awaken_tick,
     })
 }
 
