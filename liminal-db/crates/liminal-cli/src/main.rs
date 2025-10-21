@@ -19,10 +19,12 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig, HarmonyMetrics,
-    HarmonySnapshot, LqlResponse, MirrorImpulse, ReflexAction, ReflexRule, ReflexWhen,
-    SymmetryStatus, SyncConfig, TrsConfig, ViewStats,
+    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig,
+    HarmonySnapshot, LqlResponse, ReflexAction, ReflexRule, ReflexWhen, SyncConfig, TrsConfig,
+    ViewStats,
 };
+#[cfg(test)]
+use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
 use serde::Deserialize;
@@ -1339,6 +1341,20 @@ fn format_lql_event(value: &JsonValue) -> Option<String> {
 
 fn format_harmony_event(value: &JsonValue) -> Option<String> {
     let meta = value.get("meta")?;
+
+    let alpha = meta.get("alpha").and_then(|v| v.as_f64());
+    let affinity = meta.get("aff_scale").and_then(|v| v.as_f64());
+    let metabolism = meta.get("met_scale").and_then(|v| v.as_f64());
+    let sleep_delta = meta.get("sleep_delta").and_then(|v| v.as_f64());
+
+    if let (Some(alpha), Some(affinity), Some(metabolism), Some(sleep_delta)) =
+        (alpha, affinity, metabolism, sleep_delta)
+    {
+        return Some(format!(
+            "HARMONY tune alpha={alpha:.3} affinity={affinity:.3} metabolism={metabolism:.3} sleep_delta={sleep_delta:+.3}",
+        ));
+    }
+
     let strength = meta.get("strength")?.as_f64()?;
     let latency = meta.get("latency")?.as_f64()?;
     let entropy = meta.get("entropy")?.as_f64()?;
@@ -1556,6 +1572,23 @@ mod tests {
         let formatted = format_harmony_event(&payload).expect("formatted harmony");
         assert!(formatted.contains("status=DRIFT"));
         assert!(formatted.contains("mirror=-0.300@1234"));
+    }
+
+    #[test]
+    fn harmony_event_formatter_handles_trs_shape() {
+        let payload = json!({
+            "ev": "harmony",
+            "meta": {
+                "alpha": 0.27,
+                "aff_scale": 1.12,
+                "met_scale": 0.94,
+                "sleep_delta": -0.08
+            }
+        });
+        let formatted = format_harmony_event(&payload).expect("formatted trs harmony");
+        assert!(formatted.contains("alpha=0.270"));
+        assert!(formatted.contains("affinity=1.120"));
+        assert!(formatted.contains("sleep_delta=-0.080"));
     }
 
     #[test]

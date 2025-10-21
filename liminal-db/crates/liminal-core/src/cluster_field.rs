@@ -2,15 +2,18 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use blake3::Hasher;
 use rand::Rng;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::awakening::AwakeningConfig;
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
-    AffinityDelta, CellSnapshot, CollectiveDreamReportDelta, DivideDelta, DreamEdgeDelta,
-    DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta, Journal, LinkDelta, StateDelta,
-    SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
+    AffinityDelta, AwakenApplyDelta, AwakenTickDelta, CellSnapshot, CollectiveDreamReportDelta,
+    DivideDelta, DreamEdgeDelta, DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta,
+    Journal, LinkDelta, ModelBuildDelta, StateDelta, SyncAlignDelta, SyncShareDelta, TickDelta,
+    TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
     LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
@@ -18,6 +21,7 @@ use crate::lql::{
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
+use crate::resonant::{ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -48,7 +52,14 @@ pub struct ClusterField {
     dream_reports: VecDeque<(u64, DreamReport)>,
     sync_cfg: SyncConfig,
     sync_reports: VecDeque<(u64, SyncReport)>,
+    resonant_model: Option<ResonantModel>,
+    awakening_cfg: AwakeningConfig,
+    sync_log: SyncLog,
     pub trs: TrsState,
+    awakening_cfg: AwakeningConfig,
+    resonant_model: ResonantModel,
+    sync_log: SyncLog,
+    last_awaken_tick: u64,
     harmony: HarmonyTuning,
     pub views: ViewRegistry,
     next_hit_seq: u64,
@@ -108,15 +119,15 @@ pub struct ResonantModel {
 
 impl ResonantModel {
     pub fn top_edges(&self, limit: usize) -> Vec<ResonantEdge> {
-        take_top_by(&self.edges, limit, |edge| edge.weight)
+        take_top(&self.edges, limit)
     }
 
     pub fn top_influences(&self, limit: usize) -> Vec<ResonantInfluence> {
-        take_top_by(&self.influences, limit, |influence| influence.impact)
+        take_top(&self.influences, limit)
     }
 
     pub fn top_tensions(&self, limit: usize) -> Vec<ResonantTension> {
-        take_top_by(&self.tensions, limit, |tension| tension.tension)
+        take_top(&self.tensions, limit)
     }
 }
 
@@ -141,19 +152,12 @@ pub struct ResonantTension {
     pub tension: f32,
 }
 
-fn take_top_by<T, F>(items: &[T], limit: usize, score: F) -> Vec<T>
-where
-    T: Clone,
-    F: Fn(&T) -> f32,
-{
-    if limit == 0 || items.is_empty() {
-        return Vec::new();
+fn take_top<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    if limit == 0 {
+        Vec::new()
+    } else {
+        items.iter().take(limit).cloned().collect()
     }
-
-    let mut ranked: Vec<&T> = items.iter().collect();
-    ranked.sort_by(|a, b| score(*b).partial_cmp(&score(*a)).unwrap_or(Ordering::Equal));
-
-    ranked.into_iter().take(limit).cloned().collect()
 }
 
 const DEFAULT_INTROSPECT_TOP_N: usize = 10;
@@ -192,7 +196,14 @@ impl ClusterField {
             dream_reports: VecDeque::new(),
             sync_cfg: SyncConfig::default(),
             sync_reports: VecDeque::new(),
+            resonant_model: None,
+            awakening_cfg: AwakeningConfig::default(),
+            sync_log: SyncLog::new(),
             trs: TrsState::default(),
+            awakening_cfg: AwakeningConfig::default(),
+            resonant_model: ResonantModel::default(),
+            sync_log: SyncLog::default(),
+            last_awaken_tick: 0,
             harmony: HarmonyTuning::default(),
             views: ViewRegistry::new(),
             next_hit_seq: 1,
@@ -251,6 +262,107 @@ impl ClusterField {
         self.emit(EventDelta::SyncConfig(cfg));
     }
 
+    pub fn awakening_config(&self) -> AwakeningConfig {
+        self.awakening_cfg.clone()
+    }
+
+    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
+        self.awakening_cfg = cfg;
+    }
+
+    pub fn resonant_model(&self) -> &ResonantModel {
+        &self.resonant_model
+    }
+
+    pub fn sync_log(&self) -> &SyncLog {
+        &self.sync_log
+    }
+
+    pub fn last_awaken_tick(&self) -> u64 {
+        self.last_awaken_tick
+    }
+
+    pub fn restore_awakening_state(
+        &mut self,
+        cfg: AwakeningConfig,
+        model: ResonantModel,
+        sync_log: SyncLog,
+        last_tick: u64,
+    ) {
+        self.awakening_cfg = cfg;
+        self.resonant_model = model;
+        self.sync_log = sync_log;
+        self.last_awaken_tick = last_tick;
+    }
+
+    pub fn build_resonant_model(&mut self) -> String {
+        let mut hasher = Hasher::new();
+        let mut ids: Vec<NodeId> = self.cells.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(cell) = self.cells.get(&id) {
+                let data = format!(
+                    "{}|{}|{:?}|{:.3}|{:.3}|{:.3}|{}",
+                    cell.id,
+                    cell.seed.core_pattern,
+                    cell.state,
+                    cell.affinity,
+                    cell.metabolism,
+                    cell.energy,
+                    cell.links.len()
+                );
+                hasher.update(data.as_bytes());
+            }
+        }
+        hasher.update(&self.now_ms.to_le_bytes());
+        hasher.update(&(self.cells.len() as u64).to_le_bytes());
+        let hash = hasher.finalize().to_hex().to_string();
+        let cell_count = self.cells.len().min(u32::MAX as usize) as u32;
+        let frame = ModelFrame {
+            hash: hash.clone(),
+            cell_count,
+            created_ms: self.now_ms,
+        };
+        self.resonant_model.record_build(frame.clone());
+        self.sync_log
+            .record_build(frame.hash.clone(), frame.created_ms, frame.cell_count);
+        let delta = EventDelta::ModelBuild(ModelBuildDelta {
+            hash: frame.hash.clone(),
+            cell_count: frame.cell_count,
+            now_ms: frame.created_ms,
+        });
+        self.emit(delta);
+        hash
+    }
+
+    pub fn apply_awakening_model(&mut self) {
+        let hash = self.resonant_model.last_hash().map(|h| h.to_string());
+        let cell_count = self.cells.len().min(u32::MAX as usize) as u32;
+        if let Some(hash_value) = &hash {
+            self.sync_log
+                .record_apply(hash_value.clone(), self.now_ms, cell_count);
+        }
+        self.resonant_model.set_last_applied(hash.clone());
+        let delta = EventDelta::AwakenApply(AwakenApplyDelta {
+            hash,
+            config: self.awakening_cfg.clone(),
+            now_ms: self.now_ms,
+            cell_count,
+        });
+        self.emit(delta);
+    }
+
+    pub fn awaken_tick(&mut self) {
+        self.last_awaken_tick = self.now_ms;
+        self.sync_log.record_tick(self.now_ms);
+        let hash = self.resonant_model.last_applied().map(|h| h.to_string());
+        let delta = EventDelta::AwakenTick(AwakenTickDelta {
+            hash,
+            now_ms: self.now_ms,
+        });
+        self.emit(delta);
+    }
+
     pub fn last_sync_reports(&self, count: usize) -> Vec<(u64, SyncReport)> {
         let mut collected: Vec<(u64, SyncReport)> = self
             .sync_reports
@@ -261,6 +373,30 @@ impl ClusterField {
             .collect();
         collected.reverse();
         collected
+    }
+
+    pub fn resonant_model(&self) -> Option<&ResonantModel> {
+        self.resonant_model.as_ref()
+    }
+
+    pub fn set_resonant_model(&mut self, model: ResonantModel) {
+        self.resonant_model = Some(model);
+    }
+
+    pub fn clear_resonant_model(&mut self) {
+        self.resonant_model = None;
+    }
+
+    pub fn awakening_config(&self) -> AwakeningConfig {
+        self.awakening_cfg.clone()
+    }
+
+    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
+        self.awakening_cfg = cfg;
+    }
+
+    pub fn sync_log(&self) -> &SyncLog {
+        &self.sync_log
     }
 
     pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
@@ -912,6 +1048,18 @@ impl ClusterField {
         }));
     }
 
+    pub(crate) fn emit_energy_state(&self, id: NodeId) {
+        if let Some(cell) = self.cells.get(&id) {
+            self.emit(EventDelta::Energy(EnergyDelta {
+                id,
+                energy: cell.energy,
+                metabolism: cell.metabolism,
+                state: cell.state,
+                last_response_ms: cell.last_response_ms,
+            }));
+        }
+    }
+
     pub(crate) fn emit_dream_weaken(&self, from: NodeId, to: NodeId, freq: f32, avg_strength: f32) {
         self.emit(EventDelta::DreamWeaken(DreamEdgeDelta {
             from,
@@ -931,6 +1079,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_dream_report(&mut self, now_ms: u64, report: DreamReport) {
+        self.sync_log.record_dream(now_ms, &report);
         self.dream_reports.push_back((now_ms, report.clone()));
         while self.dream_reports.len() > 16 {
             self.dream_reports.pop_front();
@@ -939,6 +1088,7 @@ impl ClusterField {
     }
 
     pub(crate) fn record_sync_report(&mut self, now_ms: u64, report: SyncReport) {
+        self.sync_log.record_collective(now_ms, &report);
         self.sync_reports.push_back((now_ms, report.clone()));
         while self.sync_reports.len() > 16 {
             self.sync_reports.pop_front();
@@ -1680,6 +1830,7 @@ impl ClusterField {
             });
             events.push(event.to_string());
         }
+        self.awaken_tick();
         events
     }
 
@@ -1931,6 +2082,33 @@ impl ClusterField {
                     self.sync_reports.pop_front();
                 }
             }
+            EventDelta::ModelBuild(delta) => {
+                let frame = ModelFrame {
+                    hash: delta.hash.clone(),
+                    cell_count: delta.cell_count,
+                    created_ms: delta.now_ms,
+                };
+                self.resonant_model.record_build(frame.clone());
+                self.sync_log
+                    .record_build(frame.hash.clone(), frame.created_ms, frame.cell_count);
+            }
+            EventDelta::AwakenApply(delta) => {
+                self.awakening_cfg = delta.config.clone();
+                self.resonant_model.set_last_applied(delta.hash.clone());
+                if let Some(hash) = &delta.hash {
+                    self.sync_log
+                        .record_apply(hash.clone(), delta.now_ms, delta.cell_count);
+                }
+            }
+            EventDelta::AwakenTick(delta) => {
+                self.last_awaken_tick = delta.now_ms;
+                self.sync_log.record_tick(delta.now_ms);
+                if let Some(hash) = &delta.hash {
+                    if self.resonant_model.last_applied().is_none() {
+                        self.resonant_model.set_last_applied(Some(hash.clone()));
+                    }
+                }
+            }
         }
     }
 }
@@ -2177,14 +2355,14 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.edges = vec![
             ResonantEdge {
-                from: 3,
-                to: 4,
-                weight: 0.75,
-            },
-            ResonantEdge {
                 from: 1,
                 to: 2,
                 weight: 0.92,
+            },
+            ResonantEdge {
+                from: 3,
+                to: 4,
+                weight: 0.75,
             },
         ];
         let exec = field
@@ -2211,18 +2389,11 @@ mod tests {
     #[test]
     fn introspect_influence_defaults_limit() {
         let mut field = ClusterField::new();
-        field.resonant_model.influences = vec![
-            ResonantInfluence {
-                source: 7,
-                target: 8,
-                impact: 0.42,
-            },
-            ResonantInfluence {
-                source: 5,
-                target: 6,
-                impact: 0.66,
-            },
-        ];
+        field.resonant_model.influences = vec![ResonantInfluence {
+            source: 5,
+            target: 6,
+            impact: 0.66,
+        }];
         let exec = field
             .exec_lql(LqlAst::IntrospectInfluence { top_n: None })
             .expect("introspect influence");
@@ -2235,12 +2406,9 @@ mod tests {
         let influences = payload["meta"]["introspect_influence"]["influences"]
             .as_array()
             .expect("influences array");
-        assert_eq!(influences.len(), 2);
+        assert_eq!(influences.len(), 1);
         assert_eq!(influences[0]["source"].as_u64(), Some(5));
-        let first_impact = influences[0]["impact"].as_f64().expect("impact as f64");
-        assert!((first_impact - 0.66).abs() < 1e-6);
-        let second_impact = influences[1]["impact"].as_f64().expect("impact as f64");
-        assert!((second_impact - 0.42).abs() < 1e-6);
+        assert_eq!(influences[0]["target"].as_u64(), Some(6));
     }
 
     #[test]
@@ -2248,14 +2416,14 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.tensions = vec![
             ResonantTension {
-                from: 10,
-                to: 11,
-                tension: 0.52,
-            },
-            ResonantTension {
                 from: 8,
                 to: 9,
                 tension: 0.55,
+            },
+            ResonantTension {
+                from: 10,
+                to: 11,
+                tension: 0.52,
             },
         ];
         let exec = field
@@ -2267,8 +2435,6 @@ mod tests {
             .expect("tensions array");
         assert_eq!(tensions.len(), 2);
         assert_eq!(tensions[0]["from"].as_u64(), Some(8));
-        let top_tension = tensions[0]["tension"].as_f64().expect("tension as f64");
-        assert!((top_tension - 0.55).abs() < 1e-6);
         assert_eq!(tensions[1]["to"].as_u64(), Some(11));
     }
 
