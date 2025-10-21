@@ -19,10 +19,12 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig, HarmonyMetrics,
-    HarmonySnapshot, LqlResponse, MirrorImpulse, ReflexAction, ReflexRule, ReflexWhen,
-    SymmetryStatus, SyncConfig, TrsConfig, ViewStats,
+    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig,
+    HarmonySnapshot, LqlResponse, ReflexAction, ReflexRule, ReflexWhen, SyncConfig, TrsConfig,
+    ViewStats,
 };
+#[cfg(test)]
+use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
 use liminal_sensor::start_host_sensors;
 use liminal_store::{decode_delta, DiskJournal, Offset, SnapshotInfo, StoreStats};
 use serde::Deserialize;
