@@ -6,7 +6,7 @@ use rand::Rng;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::awakening::AwakeningConfig;
+use crate::awakening::{awaken, AwakeningConfig, AwakeningReport};
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
     AffinityDelta, CellSnapshot, CollectiveDreamReportDelta, DivideDelta, DreamEdgeDelta,
@@ -19,7 +19,7 @@ use crate::lql::{
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
-use crate::resonant::{ResonantModel, SyncLog};
+use crate::resonant::{build_model, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -217,6 +217,33 @@ impl ClusterField {
 
     pub fn clear_resonant_model(&mut self) {
         self.resonant_model = None;
+    }
+
+    pub fn rebuild_resonant_model(&mut self) -> Option<ResonantModel> {
+        let history: Vec<_> = self
+            .last_dream_reports(8)
+            .into_iter()
+            .map(|(_, report)| report)
+            .collect();
+        if history.is_empty() && self.sync_log().is_empty() {
+            self.clear_resonant_model();
+            return None;
+        }
+        let model = build_model(self, self.sync_log(), &history);
+        self.set_resonant_model(model.clone());
+        Some(model)
+    }
+
+    pub fn awaken_now(&mut self) -> AwakeningReport {
+        let model = self
+            .rebuild_resonant_model()
+            .or_else(|| self.resonant_model().cloned())
+            .unwrap_or_default();
+        let cfg = self.awakening_config();
+        let mut trs_state = std::mem::take(&mut self.trs);
+        let report = awaken(self, &model, &cfg, &mut trs_state);
+        self.trs = trs_state;
+        report
     }
 
     pub fn awakening_config(&self) -> AwakeningConfig {

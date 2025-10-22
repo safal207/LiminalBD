@@ -23,17 +23,45 @@ pub struct StreamMetrics {
 
 #[derive(Debug, Clone)]
 pub enum IncomingCommand {
-    Impulse { data: JsonValue },
-    Lql { query: String },
-    PolicySet { data: JsonValue },
-    Subscribe { pattern: String },
+    Impulse {
+        data: JsonValue,
+    },
+    Lql {
+        query: String,
+    },
+    PolicySet {
+        data: JsonValue,
+    },
+    Subscribe {
+        pattern: String,
+    },
     DreamNow,
-    DreamSet { cfg: JsonValue },
+    DreamSet {
+        cfg: JsonValue,
+    },
     DreamGet,
     SyncNow,
-    SyncSet { cfg: JsonValue },
+    SyncSet {
+        cfg: JsonValue,
+    },
     SyncGet,
+    AwakenSet {
+        cfg: JsonValue,
+    },
+    AwakenGet,
+    Introspect {
+        target: IntrospectTarget,
+        top: Option<u32>,
+    },
     Raw(JsonValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrospectTarget {
+    Awaken,
+    Model,
+    Influence,
+    Tension,
 }
 
 #[derive(Debug, Clone)]

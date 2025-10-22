@@ -1,16 +1,21 @@
 use std::cell::RefCell;
+use std::cmp::Ordering;
 
 use js_sys::Uint8Array;
 use liminal_core::morph_mind::{analyze, hints as gather_hints};
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
-use liminal_core::{detect_sync_groups, parse_lql, run_collective_dream};
-use serde_json::json;
+use liminal_core::{
+    detect_sync_groups, parse_lql, run_collective_dream, AwakeningConfig, AwakeningReport,
+    Influence, ResonantModel, Tension,
+};
+use serde_json::{json, Value as JsonValue};
 use wasm_bindgen::prelude::*;
 
 use crate::protocol::{
     adjust_tick, event_from_field_log, event_from_hint, event_from_impulse_log, event_from_metrics,
-    BridgeConfig, Outbox, ProtocolCommand, ProtocolMetrics, ProtocolPackage, ProtocolPush,
+    BridgeConfig, IntrospectRequest, IntrospectTarget, Outbox, ProtocolCommand, ProtocolMetrics,
+    ProtocolPackage, ProtocolPush,
 };
 
 thread_local! {
@@ -246,6 +251,20 @@ impl WasmState {
                         self.outbox.push_event(event);
                     }
                 }
+                ProtocolCommand::AwakenSet { cfg } => {
+                    self.field.set_awakening_config(cfg.clone());
+                    let payload = awaken_config_event(&cfg, "set");
+                    push_json_event(&mut self.outbox, payload, self.tick_ms);
+                }
+                ProtocolCommand::AwakenGet => {
+                    let cfg = self.field.awakening_config();
+                    let payload = awaken_config_event(&cfg, "cfg");
+                    push_json_event(&mut self.outbox, payload, self.tick_ms);
+                }
+                ProtocolCommand::Introspect(IntrospectRequest { target, top }) => {
+                    let payload = build_introspect_event(&mut self.field, target, top);
+                    push_json_event(&mut self.outbox, payload, self.tick_ms);
+                }
             },
         }
     }
@@ -310,6 +329,159 @@ impl WasmState {
     fn restore_package(&mut self, package: ProtocolPackage) {
         self.outbox.restore(package);
     }
+}
+
+fn push_json_event(outbox: &mut Outbox, payload: JsonValue, tick_ms: u32) {
+    let serialized = payload.to_string();
+    if let Some(event) = event_from_field_log(&serialized, tick_ms) {
+        outbox.push_event(event);
+    }
+}
+
+fn awaken_config_event(cfg: &AwakeningConfig, action: &str) -> JsonValue {
+    let cfg_json = serde_json::to_value(cfg).unwrap_or(JsonValue::Null);
+    json!({
+        "ev": "awaken",
+        "meta": {
+            "action": action,
+            "cfg": cfg_json
+        }
+    })
+}
+
+fn awaken_report_event(report: &AwakeningReport) -> JsonValue {
+    json!({
+        "ev": "awaken",
+        "meta": {
+            "action": "now",
+            "applied": report.applied,
+            "protected": report.protected,
+            "avg_tension": report.avg_tension,
+            "tick_adjust_ms": report.tick_adjust_ms,
+            "energy_delta": report.energy_delta
+        }
+    })
+}
+
+fn ensure_resonant_model(field: &mut ClusterField) -> ResonantModel {
+    field
+        .rebuild_resonant_model()
+        .or_else(|| field.resonant_model().cloned())
+        .unwrap_or_default()
+}
+
+fn build_introspect_event(
+    field: &mut ClusterField,
+    target: IntrospectTarget,
+    top: Option<u32>,
+) -> JsonValue {
+    let limit = top.unwrap_or(5).max(1).min(32) as usize;
+    match target {
+        IntrospectTarget::Awaken => awaken_report_event(&field.awaken_now()),
+        IntrospectTarget::Model => {
+            let model = ensure_resonant_model(field);
+            json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "model",
+                    "coherence": model.coherence,
+                    "edges": model.edges.len(),
+                    "influences": model.influences.len(),
+                    "tensions": model.tensions.len(),
+                    "top_nodes": top_nodes(field, limit),
+                    "requested_top": limit as u32
+                }
+            })
+        }
+        IntrospectTarget::Influence => {
+            let model = ensure_resonant_model(field);
+            json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "influence",
+                    "items": top_influences(&model, limit),
+                    "requested_top": limit as u32
+                }
+            })
+        }
+        IntrospectTarget::Tension => {
+            let model = ensure_resonant_model(field);
+            json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "tension",
+                    "items": top_tensions(&model, limit),
+                    "requested_top": limit as u32
+                }
+            })
+        }
+    }
+}
+
+fn top_nodes(field: &ClusterField, limit: usize) -> Vec<JsonValue> {
+    let mut nodes: Vec<_> = field.cells.values().collect();
+    nodes.sort_by(|a, b| {
+        b.salience
+            .partial_cmp(&a.salience)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    nodes.truncate(limit);
+    nodes
+        .into_iter()
+        .map(|cell| {
+            json!({
+                "id": cell.id,
+                "pattern": cell.seed.core_pattern,
+                "salience": cell.salience,
+                "energy": cell.energy
+            })
+        })
+        .collect()
+}
+
+fn top_influences(model: &ResonantModel, limit: usize) -> Vec<JsonValue> {
+    let mut influences: Vec<Influence> = model.influences.clone();
+    influences.sort_by(|a, b| {
+        b.weight
+            .abs()
+            .partial_cmp(&a.weight.abs())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    influences.truncate(limit);
+    influences
+        .into_iter()
+        .map(|inf| {
+            json!({
+                "source": inf.source,
+                "sink": inf.sink,
+                "weight": inf.weight,
+                "coherence": inf.coherence
+            })
+        })
+        .collect()
+}
+
+fn top_tensions(model: &ResonantModel, limit: usize) -> Vec<JsonValue> {
+    let mut tensions: Vec<Tension> = model.tensions.clone();
+    tensions.sort_by(|a, b| {
+        b.magnitude
+            .partial_cmp(&a.magnitude)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.node.cmp(&b.node))
+    });
+    tensions.truncate(limit);
+    tensions
+        .into_iter()
+        .map(|ten| {
+            json!({
+                "node": ten.node,
+                "magnitude": ten.magnitude,
+                "relief": ten.relief
+            })
+        })
+        .collect()
 }
 
 #[wasm_bindgen]

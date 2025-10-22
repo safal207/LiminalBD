@@ -16,8 +16,8 @@ use tracing::{error, info, warn};
 use crate::stream_codec::{decode_cbor_json, encode_cbor_json};
 use crate::{
     command_sender, global_hub, register_client_snapshot, remove_client_snapshot,
-    update_client_format, update_client_ping, ClientSnapshot, IncomingCommand, StreamEvent,
-    StreamMetrics,
+    update_client_format, update_client_ping, ClientSnapshot, IncomingCommand, IntrospectTarget,
+    StreamEvent, StreamMetrics,
 };
 
 static NEXT_CLIENT_ID: Lazy<std::sync::atomic::AtomicU64> =
@@ -206,6 +206,40 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
                                         "sync.get" => {
                                             let _ = cmd_tx.send(IncomingCommand::SyncGet).await;
                                         }
+                                        "awaken.set" => {
+                                            let cfg = value.get("cfg").cloned().unwrap_or(JsonValue::Null);
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::AwakenSet { cfg })
+                                                .await;
+                                        }
+                                        "awaken.get" => {
+                                            let _ = cmd_tx.send(IncomingCommand::AwakenGet).await;
+                                        }
+                                        "awaken.now" => {
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::Introspect {
+                                                    target: IntrospectTarget::Awaken,
+                                                    top: None,
+                                                })
+                                                .await;
+                                        }
+                                        "introspect" => {
+                                            let target = value
+                                                .get("target")
+                                                .and_then(|v| v.as_str())
+                                                .and_then(parse_introspect_target);
+                                            if let Some(target) = target {
+                                                let top = value
+                                                    .get("top")
+                                                    .and_then(|v| v.as_u64())
+                                                    .map(|v| v.min(u32::MAX as u64) as u32);
+                                                let _ = cmd_tx
+                                                    .send(IncomingCommand::Introspect { target, top })
+                                                    .await;
+                                            } else {
+                                                warn!("ws_server.invalid_introspect_target");
+                                            }
+                                        }
                                         other => {
                                             warn!(command = %other, "ws_server.unknown_cmd");
                                             let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;
@@ -238,5 +272,15 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
             let _ = metrics_task.await;
             remove_client_snapshot(client_id);
         });
+    }
+}
+
+fn parse_introspect_target(label: &str) -> Option<IntrospectTarget> {
+    match label.to_ascii_lowercase().as_str() {
+        "awaken" => Some(IntrospectTarget::Awaken),
+        "model" => Some(IntrospectTarget::Model),
+        "influence" => Some(IntrospectTarget::Influence),
+        "tension" => Some(IntrospectTarget::Tension),
+        _ => None,
     }
 }
