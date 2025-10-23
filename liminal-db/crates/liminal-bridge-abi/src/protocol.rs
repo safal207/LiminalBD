@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use liminal_core::types::{Hint, Impulse as CoreImpulse, ImpulseKind, Metrics as CoreMetrics};
-use liminal_core::{DreamConfig, SyncConfig, TrsConfig};
+use liminal_core::{AwakeningConfig, DreamConfig, SyncConfig, TrsConfig};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Value;
 use serde_json::Value as JsonValue;
@@ -61,6 +61,54 @@ pub enum ProtocolCommand {
     SyncGet,
     #[serde(rename = "sync.now")]
     SyncNow,
+    #[serde(rename = "awaken.set")]
+    AwakenSet { cfg: AwakeningConfig },
+    #[serde(rename = "awaken.get")]
+    AwakenGet,
+    #[serde(rename = "introspect")]
+    Introspect(IntrospectRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IntrospectTarget {
+    Awaken,
+    Model,
+    Influence,
+    Tension,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntrospectRequest {
+    #[serde(rename = "target")]
+    pub target: IntrospectTarget,
+    #[serde(rename = "top", skip_serializing_if = "Option::is_none")]
+    pub top: Option<u32>,
+}
+
+impl IntrospectRequest {
+    pub fn new(target: IntrospectTarget) -> Self {
+        IntrospectRequest { target, top: None }
+    }
+
+    pub fn with_top(mut self, value: Option<u32>) -> Self {
+        self.top = value;
+        self
+    }
+}
+
+impl ProtocolCommand {
+    pub fn awaken_set(cfg: AwakeningConfig) -> Self {
+        ProtocolCommand::AwakenSet { cfg }
+    }
+
+    pub fn awaken_get() -> Self {
+        ProtocolCommand::AwakenGet
+    }
+
+    pub fn introspect(target: IntrospectTarget, top: Option<u32>) -> Self {
+        ProtocolCommand::Introspect(IntrospectRequest { target, top })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -449,5 +497,35 @@ mod tests {
         let bytes = serde_cbor::to_vec(&metrics).unwrap();
         let decoded: ProtocolMetrics = serde_cbor::from_slice(&bytes).unwrap();
         assert_eq!(decoded, metrics);
+    }
+
+    #[test]
+    fn command_introspect_roundtrip() {
+        let command = ProtocolCommand::introspect(IntrospectTarget::Influence, Some(3));
+        let bytes = serde_cbor::to_vec(&command).unwrap();
+        let decoded: ProtocolCommand = serde_cbor::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn command_awaken_set_roundtrip() {
+        let cfg = AwakeningConfig {
+            max_nodes: 6,
+            energy_floor: 0.4,
+            energy_boost: 0.2,
+            salience_boost: 0.1,
+            protect_salience: 0.8,
+            tick_bias_ms: 24,
+            target_gain: 0.05,
+        };
+        let command = ProtocolCommand::awaken_set(cfg.clone());
+        let bytes = serde_cbor::to_vec(&command).unwrap();
+        let decoded: ProtocolCommand = serde_cbor::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, command);
+        if let ProtocolCommand::AwakenSet { cfg: decoded_cfg } = decoded {
+            assert_eq!(decoded_cfg, cfg);
+        } else {
+            panic!("expected awaken.set command");
+        }
     }
 }

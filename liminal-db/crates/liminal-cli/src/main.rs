@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
@@ -14,7 +15,7 @@ use liminal_bridge_net::{
     format_clients as ws_format_clients, list_clients as ws_list_clients,
     publish_event as ws_publish_event, publish_metrics as ws_publish_metrics,
     set_default_format as ws_set_default_format, take_command_receiver as ws_take_command_receiver,
-    ws_server, IncomingCommand,
+    ws_server, IncomingCommand, IntrospectTarget,
 };
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
@@ -442,6 +443,26 @@ async fn run_interactive(
                         .await
                         {
                             eprintln!("dream command failed: {err}");
+                        }
+                    }
+                    command if command.starts_with("awaken") => {
+                        if let Err(err) = handle_awaken_command(
+                            command.trim_start_matches("awaken").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("awaken command failed: {err}");
+                        }
+                    }
+                    command if command.starts_with("introspect") => {
+                        if let Err(err) = handle_introspect_command(
+                            command.trim_start_matches("introspect").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("introspect command failed: {err}");
                         }
                     }
                     command if command.starts_with("sync") => {
@@ -906,6 +927,112 @@ async fn handle_sync_command(command: &str, field: &StdArc<Mutex<ClusterField>>)
     Ok(())
 }
 
+async fn handle_awaken_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
+    let mut parts = command.splitn(2, ' ');
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "cfg" => {
+            let event = {
+                let cfg = { field.lock().await.awakening_config() };
+                awaken_config_event(&cfg, "cfg")?
+            };
+            if let Some(line) = format_awaken_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
+        }
+        "set" => {
+            let raw = parts.next().unwrap_or("").trim();
+            if raw.is_empty() {
+                return Err(anyhow!("usage: :awaken set <json>"));
+            }
+            let update: AwakeningConfigUpdate = serde_json::from_str(raw)?;
+            let event = {
+                let mut guard = field.lock().await;
+                let mut cfg = guard.awakening_config();
+                update.apply(&mut cfg);
+                guard.set_awakening_config(cfg.clone());
+                awaken_config_event(&cfg, "set")?
+            };
+            if let Some(line) = format_awaken_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
+        }
+        "now" => {
+            let event = {
+                let mut guard = field.lock().await;
+                let report = guard.awaken_now();
+                awaken_report_event(&report)
+            };
+            if let Some(line) = format_awaken_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
+        }
+        "help" => {
+            println!("awaken commands: cfg | set <json> | now");
+        }
+        other => {
+            return Err(anyhow!("unknown awaken subcommand: {}", other));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_introspect_command(
+    command: &str,
+    field: &StdArc<Mutex<ClusterField>>,
+) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    if sub.is_empty() || sub.eq_ignore_ascii_case("help") {
+        println!("introspect commands: model top <n> | influence top <n> | tension top <n>");
+        return Ok(());
+    }
+
+    let target = match sub {
+        "model" => IntrospectTarget::Model,
+        "influence" => IntrospectTarget::Influence,
+        "tension" => IntrospectTarget::Tension,
+        other => return Err(anyhow!("unknown introspect target: {}", other)),
+    };
+
+    let args: Vec<&str> = parts.collect();
+    let mut iter = args.into_iter();
+    let mut top: Option<u32> = None;
+    while let Some(token) = iter.next() {
+        if token.eq_ignore_ascii_case("top") {
+            let Some(value) = iter.next() else {
+                return Err(anyhow!("usage: :introspect {} top <n>", sub));
+            };
+            let parsed = value
+                .parse::<u32>()
+                .map_err(|_| anyhow!("top expects a positive integer, got {}", value))?;
+            if parsed == 0 {
+                return Err(anyhow!("top must be greater than zero"));
+            }
+            top = Some(parsed);
+        } else {
+            return Err(anyhow!("unexpected argument '{}'", token));
+        }
+    }
+
+    let event = {
+        let mut guard = field.lock().await;
+        introspect_event_from_field(&mut *guard, target, top)?
+    };
+    for line in format_introspect_event(&event) {
+        println!("{}", line);
+    }
+    println!("{}", serde_json::to_string_pretty(&event)?);
+    ws_publish_event(event);
+    Ok(())
+}
+
 async fn handle_dream_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
     let mut parts = command.splitn(2, ' ');
     let sub = parts.next().unwrap_or("").trim();
@@ -1048,6 +1175,50 @@ impl DreamConfigUpdate {
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct AwakeningConfigUpdate {
+    #[serde(default)]
+    max_nodes: Option<usize>,
+    #[serde(default)]
+    energy_floor: Option<f32>,
+    #[serde(default)]
+    energy_boost: Option<f32>,
+    #[serde(default)]
+    salience_boost: Option<f32>,
+    #[serde(default)]
+    protect_salience: Option<f32>,
+    #[serde(default)]
+    tick_bias_ms: Option<i32>,
+    #[serde(default)]
+    target_gain: Option<f32>,
+}
+
+impl AwakeningConfigUpdate {
+    fn apply(self, cfg: &mut AwakeningConfig) {
+        if let Some(value) = self.max_nodes {
+            cfg.max_nodes = value.max(1);
+        }
+        if let Some(value) = self.energy_floor {
+            cfg.energy_floor = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.energy_boost {
+            cfg.energy_boost = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.salience_boost {
+            cfg.salience_boost = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.protect_salience {
+            cfg.protect_salience = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = self.tick_bias_ms {
+            cfg.tick_bias_ms = value;
+        }
+        if let Some(value) = self.target_gain {
+            cfg.target_gain = value.clamp(0.0, 1.0);
+        }
+    }
+}
+
 async fn handle_network_command(
     command: IncomingCommand,
     field: &StdArc<Mutex<ClusterField>>,
@@ -1174,6 +1345,43 @@ async fn handle_network_command(
         IncomingCommand::SyncGet => {
             let cfg = { field.lock().await.sync_config() };
             println!("{}", serde_json::to_string_pretty(&cfg)?);
+        }
+        IncomingCommand::AwakenSet { cfg } => {
+            let update: AwakeningConfigUpdate = serde_json::from_value(cfg)?;
+            let event = {
+                let mut guard = field.lock().await;
+                let mut current = guard.awakening_config();
+                update.apply(&mut current);
+                guard.set_awakening_config(current.clone());
+                awaken_config_event(&current, "set")?
+            };
+            if let Some(line) = format_awaken_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
+        }
+        IncomingCommand::AwakenGet => {
+            let event = {
+                let cfg = { field.lock().await.awakening_config() };
+                awaken_config_event(&cfg, "cfg")?
+            };
+            if let Some(line) = format_awaken_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
+        }
+        IncomingCommand::Introspect { target, top } => {
+            let event = {
+                let mut guard = field.lock().await;
+                introspect_event_from_field(&mut *guard, target, top)?
+            };
+            for line in format_introspect_event(&event) {
+                println!("{}", line);
+            }
+            println!("{}", serde_json::to_string_pretty(&event)?);
+            ws_publish_event(event);
         }
         IncomingCommand::Raw(value) => {
             println!("WS RAW {}", value);
@@ -1496,6 +1704,283 @@ fn format_stats_output(stats: &ViewStats) -> (u32, f64, f64, f64, String) {
     (count, avg_strength, avg_latency, emotional, top)
 }
 
+fn awaken_config_event(cfg: &AwakeningConfig, action: &str) -> Result<JsonValue> {
+    let cfg_json = serde_json::to_value(cfg)?;
+    Ok(json!({
+        "ev": "awaken",
+        "meta": {
+            "action": action,
+            "cfg": cfg_json
+        }
+    }))
+}
+
+fn awaken_report_event(report: &AwakeningReport) -> JsonValue {
+    json!({
+        "ev": "awaken",
+        "meta": {
+            "action": "now",
+            "applied": report.applied,
+            "protected": report.protected,
+            "avg_tension": report.avg_tension,
+            "tick_adjust_ms": report.tick_adjust_ms,
+            "energy_delta": report.energy_delta
+        }
+    })
+}
+
+fn format_awaken_event(event: &JsonValue) -> Option<String> {
+    let meta = event.get("meta")?.as_object()?;
+    let action = meta.get("action")?.as_str()?;
+    match action {
+        "now" => {
+            let applied = meta.get("applied")?.as_u64().unwrap_or(0);
+            let protected = meta.get("protected")?.as_u64().unwrap_or(0);
+            let avg_tension = meta.get("avg_tension")?.as_f64().unwrap_or(0.0);
+            let tick_adjust = meta.get("tick_adjust_ms")?.as_i64().unwrap_or(0);
+            let energy_delta = meta.get("energy_delta")?.as_f64().unwrap_or(0.0);
+            Some(format!(
+                "AWAKEN action=now applied={} protected={} avg_tension={:.2} tick_adjust={}ms energy_delta={:.3}",
+                applied, protected, avg_tension, tick_adjust, energy_delta
+            ))
+        }
+        "set" | "cfg" => {
+            let cfg = meta.get("cfg")?.as_object()?;
+            let max_nodes = cfg.get("max_nodes")?.as_u64().unwrap_or(0);
+            let energy_floor = cfg.get("energy_floor")?.as_f64().unwrap_or(0.0);
+            let energy_boost = cfg.get("energy_boost")?.as_f64().unwrap_or(0.0);
+            let salience_boost = cfg.get("salience_boost")?.as_f64().unwrap_or(0.0);
+            let protect_salience = cfg.get("protect_salience")?.as_f64().unwrap_or(0.0);
+            let tick_bias = cfg.get("tick_bias_ms")?.as_i64().unwrap_or(0);
+            let target_gain = cfg.get("target_gain")?.as_f64().unwrap_or(0.0);
+            Some(format!(
+                "AWAKEN action={} max_nodes={} energy_floor={:.2} energy_boost={:.2} salience_boost={:.2} protect_salience={:.2} tick_bias={}ms target_gain={:.3}",
+                action,
+                max_nodes,
+                energy_floor,
+                energy_boost,
+                salience_boost,
+                protect_salience,
+                tick_bias,
+                target_gain
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn ensure_resonant_model(field: &mut ClusterField) -> ResonantModel {
+    field
+        .rebuild_resonant_model()
+        .or_else(|| field.resonant_model().cloned())
+        .unwrap_or_default()
+}
+
+fn introspect_event_from_field(
+    field: &mut ClusterField,
+    target: IntrospectTarget,
+    top: Option<u32>,
+) -> Result<JsonValue> {
+    let limit = top.unwrap_or(5).max(1).min(32) as usize;
+    match target {
+        IntrospectTarget::Awaken => Ok(awaken_report_event(&field.awaken_now())),
+        IntrospectTarget::Model => {
+            let model = ensure_resonant_model(field);
+            Ok(json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "model",
+                    "coherence": model.coherence,
+                    "edges": model.edges.len(),
+                    "influences": model.influences.len(),
+                    "tensions": model.tensions.len(),
+                    "top_nodes": top_nodes(field, limit),
+                    "requested_top": limit as u32
+                }
+            }))
+        }
+        IntrospectTarget::Influence => {
+            let model = ensure_resonant_model(field);
+            Ok(json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "influence",
+                    "items": top_influences(&model, limit),
+                    "requested_top": limit as u32
+                }
+            }))
+        }
+        IntrospectTarget::Tension => {
+            let model = ensure_resonant_model(field);
+            Ok(json!({
+                "ev": "introspect",
+                "meta": {
+                    "target": "tension",
+                    "items": top_tensions(&model, limit),
+                    "requested_top": limit as u32
+                }
+            }))
+        }
+    }
+}
+
+fn top_nodes(field: &ClusterField, limit: usize) -> Vec<JsonValue> {
+    let mut nodes: Vec<_> = field.cells.values().collect();
+    nodes.sort_by(|a, b| {
+        b.salience
+            .partial_cmp(&a.salience)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    nodes.truncate(limit);
+    nodes
+        .into_iter()
+        .map(|cell| {
+            json!({
+                "id": cell.id,
+                "pattern": cell.seed.core_pattern,
+                "salience": cell.salience,
+                "energy": cell.energy
+            })
+        })
+        .collect()
+}
+
+fn top_influences(model: &ResonantModel, limit: usize) -> Vec<JsonValue> {
+    let mut influences: Vec<Influence> = model.influences.clone();
+    influences.sort_by(|a, b| {
+        b.weight
+            .abs()
+            .partial_cmp(&a.weight.abs())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    influences.truncate(limit);
+    influences
+        .into_iter()
+        .map(|inf| {
+            json!({
+                "source": inf.source,
+                "sink": inf.sink,
+                "weight": inf.weight,
+                "coherence": inf.coherence
+            })
+        })
+        .collect()
+}
+
+fn top_tensions(model: &ResonantModel, limit: usize) -> Vec<JsonValue> {
+    let mut tensions: Vec<Tension> = model.tensions.clone();
+    tensions.sort_by(|a, b| {
+        b.magnitude
+            .partial_cmp(&a.magnitude)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.node.cmp(&b.node))
+    });
+    tensions.truncate(limit);
+    tensions
+        .into_iter()
+        .map(|ten| {
+            json!({
+                "node": ten.node,
+                "magnitude": ten.magnitude,
+                "relief": ten.relief
+            })
+        })
+        .collect()
+}
+
+fn format_introspect_event(event: &JsonValue) -> Vec<String> {
+    let Some(meta) = event.get("meta").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    let Some(target) = meta.get("target").and_then(|t| t.as_str()) else {
+        return Vec::new();
+    };
+    match target {
+        "model" => {
+            let coherence = meta
+                .get("coherence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let edges = meta.get("edges").and_then(|v| v.as_u64()).unwrap_or(0);
+            let influences = meta.get("influences").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tensions = meta.get("tensions").and_then(|v| v.as_u64()).unwrap_or(0);
+            let top_nodes = meta
+                .get("top_nodes")
+                .and_then(|v| v.as_array())
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .map(|node| {
+                            let id = node.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let pattern =
+                                node.get("pattern").and_then(|v| v.as_str()).unwrap_or("-");
+                            let salience =
+                                node.get("salience").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let energy = node.get("energy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            format!("n{}:{}:{:.2}:{:.2}", id, pattern, salience, energy)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "-".into());
+            vec![format!(
+                "INTROSPECT model coherence={:.3} edges={} influences={} tensions={} nodes=[{}]",
+                coherence, edges, influences, tensions, top_nodes
+            )]
+        }
+        "influence" => {
+            let Some(items) = meta.get("items").and_then(|v| v.as_array()) else {
+                return vec!["INTROSPECT influence none".into()];
+            };
+            if items.is_empty() {
+                return vec!["INTROSPECT influence none".into()];
+            }
+            items
+                .iter()
+                .map(|item| {
+                    let source = item.get("source").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let sink = item.get("sink").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let weight = item.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let coherence = item
+                        .get("coherence")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    format!(
+                        "INTROSPECT influence source=n{} sink=n{} weight={:.3} coherence={:.3}",
+                        source, sink, weight, coherence
+                    )
+                })
+                .collect()
+        }
+        "tension" => {
+            let Some(items) = meta.get("items").and_then(|v| v.as_array()) else {
+                return vec!["INTROSPECT tension none".into()];
+            };
+            if items.is_empty() {
+                return vec!["INTROSPECT tension none".into()];
+            }
+            items
+                .iter()
+                .map(|item| {
+                    let node = item.get("node").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let magnitude = item
+                        .get("magnitude")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let relief = item.get("relief").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    format!(
+                        "INTROSPECT tension node=n{} magnitude={:.3} relief={:.3}",
+                        node, magnitude, relief
+                    )
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn render_harmony_snapshot_line(snapshot: &HarmonySnapshot) -> String {
     let status = snapshot.status.as_str().to_uppercase();
     let pattern = snapshot
@@ -1615,5 +2100,32 @@ mod tests {
         assert!(line.contains("status=DRIFT"));
         assert!(line.contains("pattern=cpu/load"));
         assert!(line.contains("mirror=-0.220@123"));
+    }
+
+    #[test]
+    fn awaken_event_formatter_handles_config() {
+        let payload = awaken_config_event(&AwakeningConfig::default(), "cfg").unwrap();
+        let line = format_awaken_event(&payload).expect("awaken cfg line");
+        assert!(line.contains("AWAKEN action=cfg"));
+        assert!(line.contains("max_nodes"));
+    }
+
+    #[test]
+    fn introspect_event_formatter_lists_influences() {
+        let payload = json!({
+            "ev": "introspect",
+            "meta": {
+                "target": "influence",
+                "items": [
+                    {"source": 1, "sink": 2, "weight": 0.42, "coherence": 0.65},
+                    {"source": 3, "sink": 4, "weight": -0.31, "coherence": 0.72}
+                ],
+                "requested_top": 2
+            }
+        });
+        let lines = format_introspect_event(&payload);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("INTROSPECT influence"));
+        assert!(lines[0].contains("source=n1"));
     }
 }
