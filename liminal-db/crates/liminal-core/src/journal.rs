@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::awakening::AwakeningConfig;
 use crate::dream_engine::{DreamConfig, DreamReport};
 use crate::reflex::{ReflexFire, ReflexId, ReflexRule};
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -67,6 +68,12 @@ pub enum EventDelta {
     SyncAlign(SyncAlignDelta),
     #[serde(rename = "collective_dream_report")]
     CollectiveDreamReport(CollectiveDreamReportDelta),
+    #[serde(rename = "model_build")]
+    ModelBuild(ModelBuildDelta),
+    #[serde(rename = "awaken_apply")]
+    AwakenApply(AwakenApplyDelta),
+    #[serde(rename = "awaken_tick")]
+    AwakenTick(AwakenTickDelta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +196,28 @@ pub struct TrsHarmonyDelta {
     pub affinity_scale: f32,
     pub metabolism_scale: f32,
     pub sleep_delta: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelBuildDelta {
+    pub hash: String,
+    pub cell_count: u32,
+    pub now_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwakenApplyDelta {
+    pub hash: Option<String>,
+    pub config: AwakeningConfig,
+    pub now_ms: u64,
+    #[serde(default)]
+    pub cell_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwakenTickDelta {
+    pub hash: Option<String>,
+    pub now_ms: u64,
 }
 
 impl From<&crate::node_cell::NodeCell> for CellSnapshot {
