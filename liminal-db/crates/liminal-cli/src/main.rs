@@ -20,9 +20,9 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    detect_sync_groups, parse_lql, run_collective_dream, ClusterField, DreamConfig,
-    HarmonySnapshot, LqlResponse, ReflexAction, ReflexRule, ReflexWhen, SyncConfig, TrsConfig,
-    ViewStats,
+    detect_sync_groups, parse_lql, run_collective_dream, AwakeningConfig, AwakeningReport,
+    ClusterField, DreamConfig, HarmonySnapshot, Influence, LqlResponse, ReflexAction, ReflexRule,
+    ReflexWhen, ResonantModel, SyncConfig, Tension, TrsConfig, ViewStats,
 };
 #[cfg(test)]
 use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};

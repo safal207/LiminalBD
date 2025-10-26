@@ -188,7 +188,7 @@ mod tests {
         field.apply_awakening_model();
         field.awaken_tick();
 
-        let snapshot_model = field.resonant_model().clone();
+        let snapshot_model = field.resonant_model().cloned();
         let snapshot_sync = field.sync_log().clone();
         let snapshot_tick = field.last_awaken_tick();
 
@@ -211,7 +211,7 @@ mod tests {
             .expect("snapshot present");
         let mut restored = seed.into_field();
         assert_eq!(restored.awakening_config(), initial_cfg);
-        assert_eq!(restored.resonant_model().clone(), snapshot_model);
+        assert_eq!(restored.resonant_model().cloned(), snapshot_model);
         assert_eq!(restored.sync_log().clone(), snapshot_sync);
         assert_eq!(restored.last_awaken_tick(), snapshot_tick);
 
@@ -223,10 +223,7 @@ mod tests {
         }
 
         assert_eq!(restored.awakening_config(), field.awakening_config());
-        assert_eq!(
-            restored.resonant_model().clone(),
-            field.resonant_model().clone()
-        );
+        assert_eq!(restored.resonant_model().cloned(), field.resonant_model().cloned());
         assert_eq!(restored.sync_log().clone(), field.sync_log().clone());
         assert_eq!(restored.last_awaken_tick(), field.last_awaken_tick());
     }

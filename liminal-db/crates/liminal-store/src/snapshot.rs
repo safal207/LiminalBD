@@ -1,9 +1,12 @@
 use anyhow::Result;
 use liminal_core::{
     AwakeningConfig, CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, ResonantModel,
-    SeedParams, SyncConfig, SyncLog, TrsState, RESONANT_SNAPSHOT_LIMIT, SYNCLOG_SNAPSHOT_LIMIT,
+    SeedParams, SyncConfig, SyncLog, TrsState,
 };
 use serde::{Deserialize, Serialize};
+
+const RESONANT_SNAPSHOT_LIMIT: usize = 48;
+const SYNCLOG_SNAPSHOT_LIMIT: usize = 96;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotEnvelope {
@@ -99,7 +102,10 @@ pub fn create_snapshot(cluster: &ClusterField) -> Result<Vec<u8>> {
         dream: Some(cluster.dream_config()),
         sync: Some(cluster.sync_config()),
         awakening: Some(cluster.awakening_config()),
-        resonant: Some(cluster.resonant_model().truncated(RESONANT_SNAPSHOT_LIMIT)),
+        resonant: cluster
+            .resonant_model()
+            .cloned()
+            .map(|model| model.truncated(RESONANT_SNAPSHOT_LIMIT)),
         sync_log: Some(cluster.sync_log().truncated(SYNCLOG_SNAPSHOT_LIMIT)),
         last_awaken_tick: cluster.last_awaken_tick(),
     };

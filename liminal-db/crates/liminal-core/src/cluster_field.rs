@@ -21,7 +21,7 @@ use crate::lql::{
 };
 use crate::node_cell::NodeCell;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
-use crate::resonant::{build_model, ResonantModel, SyncLog};
+use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
@@ -52,13 +52,10 @@ pub struct ClusterField {
     dream_reports: VecDeque<(u64, DreamReport)>,
     sync_cfg: SyncConfig,
     sync_reports: VecDeque<(u64, SyncReport)>,
-    resonant_model: Option<ResonantModel>,
+    cached_resonant_model: Option<ResonantModel>,
     awakening_cfg: AwakeningConfig,
     sync_log: SyncLog,
     pub trs: TrsState,
-    awakening_cfg: AwakeningConfig,
-    resonant_model: ResonantModel,
-    sync_log: SyncLog,
     last_awaken_tick: u64,
     harmony: HarmonyTuning,
     pub views: ViewRegistry,
@@ -107,59 +104,6 @@ struct NoradrenalineEffect {
     strength: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
-pub struct ResonantModel {
-    #[serde(default)]
-    pub edges: Vec<ResonantEdge>,
-    #[serde(default)]
-    pub influences: Vec<ResonantInfluence>,
-    #[serde(default)]
-    pub tensions: Vec<ResonantTension>,
-}
-
-impl ResonantModel {
-    pub fn top_edges(&self, limit: usize) -> Vec<ResonantEdge> {
-        take_top(&self.edges, limit)
-    }
-
-    pub fn top_influences(&self, limit: usize) -> Vec<ResonantInfluence> {
-        take_top(&self.influences, limit)
-    }
-
-    pub fn top_tensions(&self, limit: usize) -> Vec<ResonantTension> {
-        take_top(&self.tensions, limit)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ResonantEdge {
-    pub from: NodeId,
-    pub to: NodeId,
-    pub weight: f32,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ResonantInfluence {
-    pub source: NodeId,
-    pub target: NodeId,
-    pub impact: f32,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ResonantTension {
-    pub from: NodeId,
-    pub to: NodeId,
-    pub tension: f32,
-}
-
-fn take_top<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
-    if limit == 0 {
-        Vec::new()
-    } else {
-        items.iter().take(limit).cloned().collect()
-    }
-}
-
 const DEFAULT_INTROSPECT_TOP_N: usize = 10;
 
 impl Default for HarmonyTuning {
@@ -196,13 +140,10 @@ impl ClusterField {
             dream_reports: VecDeque::new(),
             sync_cfg: SyncConfig::default(),
             sync_reports: VecDeque::new(),
-            resonant_model: None,
+            cached_resonant_model: None,
             awakening_cfg: AwakeningConfig::default(),
             sync_log: SyncLog::new(),
             trs: TrsState::default(),
-            awakening_cfg: AwakeningConfig::default(),
-            resonant_model: ResonantModel::default(),
-            sync_log: SyncLog::default(),
             last_awaken_tick: 0,
             harmony: HarmonyTuning::default(),
             views: ViewRegistry::new(),
@@ -270,12 +211,20 @@ impl ClusterField {
         self.awakening_cfg = cfg;
     }
 
-    pub fn resonant_model(&self) -> &ResonantModel {
-        &self.resonant_model
-    }
-
     pub fn sync_log(&self) -> &SyncLog {
         &self.sync_log
+    }
+
+    pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
+        let mut collected: Vec<(u64, DreamReport)> = self
+            .dream_reports
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect();
+        collected.reverse();
+        collected
     }
 
     pub fn last_awaken_tick(&self) -> u64 {
@@ -290,6 +239,7 @@ impl ClusterField {
         last_tick: u64,
     ) {
         self.awakening_cfg = cfg;
+        self.cached_resonant_model = Some(model.clone());
         self.resonant_model = model;
         self.sync_log = sync_log;
         self.last_awaken_tick = last_tick;
@@ -340,7 +290,7 @@ impl ClusterField {
         let cell_count = self.cells.len().min(u32::MAX as usize) as u32;
         if let Some(hash_value) = &hash {
             self.sync_log
-                .record_apply(hash_value.clone(), self.now_ms, cell_count);
+                .record_apply(Some(hash_value.clone()), self.now_ms, cell_count);
         }
         self.resonant_model.set_last_applied(hash.clone());
         let delta = EventDelta::AwakenApply(AwakenApplyDelta {
@@ -376,15 +326,15 @@ impl ClusterField {
     }
 
     pub fn resonant_model(&self) -> Option<&ResonantModel> {
-        self.resonant_model.as_ref()
+        self.cached_resonant_model.as_ref()
     }
 
     pub fn set_resonant_model(&mut self, model: ResonantModel) {
-        self.resonant_model = Some(model);
+        self.cached_resonant_model = Some(model);
     }
 
     pub fn clear_resonant_model(&mut self) {
-        self.resonant_model = None;
+        self.cached_resonant_model = None;
     }
 
     pub fn rebuild_resonant_model(&mut self) -> Option<ResonantModel> {
@@ -412,30 +362,6 @@ impl ClusterField {
         let report = awaken(self, &model, &cfg, &mut trs_state);
         self.trs = trs_state;
         report
-    }
-
-    pub fn awakening_config(&self) -> AwakeningConfig {
-        self.awakening_cfg.clone()
-    }
-
-    pub fn set_awakening_config(&mut self, cfg: AwakeningConfig) {
-        self.awakening_cfg = cfg;
-    }
-
-    pub fn sync_log(&self) -> &SyncLog {
-        &self.sync_log
-    }
-
-    pub fn last_dream_reports(&self, count: usize) -> Vec<(u64, DreamReport)> {
-        let mut collected: Vec<(u64, DreamReport)> = self
-            .dream_reports
-            .iter()
-            .rev()
-            .take(count)
-            .cloned()
-            .collect();
-        collected.reverse();
-        collected
     }
 
     pub fn cell(&self, id: NodeId) -> Option<&NodeCell> {
@@ -2124,7 +2050,7 @@ impl ClusterField {
                 self.resonant_model.set_last_applied(delta.hash.clone());
                 if let Some(hash) = &delta.hash {
                     self.sync_log
-                        .record_apply(hash.clone(), delta.now_ms, delta.cell_count);
+                        .record_apply(Some(hash.clone()), delta.now_ms, delta.cell_count);
                 }
             }
             EventDelta::AwakenTick(delta) => {
@@ -2184,6 +2110,9 @@ mod tests {
     #![allow(dead_code, unnameable_test_items)]
 
     use super::*;
+    use crate::resonant::{
+        Influence as ResonantInfluence, ResonantEdge, Tension as ResonantTension,
+    };
     use crate::reflex::ReflexWhen;
     use crate::types::Hint;
     use serde_json::Value;
@@ -2385,11 +2314,13 @@ mod tests {
                 from: 1,
                 to: 2,
                 weight: 0.92,
+                ..Default::default()
             },
             ResonantEdge {
                 from: 3,
                 to: 4,
                 weight: 0.75,
+                ..Default::default()
             },
         ];
         let exec = field
@@ -2420,6 +2351,7 @@ mod tests {
             source: 5,
             target: 6,
             impact: 0.66,
+            ..Default::default()
         }];
         let exec = field
             .exec_lql(LqlAst::IntrospectInfluence { top_n: None })
@@ -2446,11 +2378,13 @@ mod tests {
                 from: 8,
                 to: 9,
                 tension: 0.55,
+                ..Default::default()
             },
             ResonantTension {
                 from: 10,
                 to: 11,
                 tension: 0.52,
+                ..Default::default()
             },
         ];
         let exec = field

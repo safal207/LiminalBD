@@ -7,7 +7,7 @@ use crate::dream_engine::DreamReport;
 use crate::synchrony::SyncReport;
 use crate::types::NodeId;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ResonantEdge {
     pub from: NodeId,
     pub to: NodeId,
@@ -15,7 +15,7 @@ pub struct ResonantEdge {
     pub coherence: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Influence {
     pub source: NodeId,
     pub sink: NodeId,
@@ -23,11 +23,18 @@ pub struct Influence {
     pub coherence: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Tension {
     pub node: NodeId,
     pub magnitude: f32,
     pub relief: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModelFrame {
+    pub hash: String,
+    pub cell_count: u32,
+    pub created_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -36,6 +43,60 @@ pub struct ResonantModel {
     pub influences: Vec<Influence>,
     pub tensions: Vec<Tension>,
     pub coherence: f32,
+    #[serde(skip)]
+    last_build: Option<ModelFrame>,
+    #[serde(skip)]
+    last_applied: Option<String>,
+}
+
+impl ResonantModel {
+    pub fn record_build(&mut self, frame: ModelFrame) {
+        self.last_build = Some(frame);
+    }
+
+    pub fn last_hash(&self) -> Option<&String> {
+        self.last_build.as_ref().map(|frame| &frame.hash)
+    }
+
+    pub fn last_build(&self) -> Option<&ModelFrame> {
+        self.last_build.as_ref()
+    }
+
+    pub fn set_last_applied(&mut self, hash: Option<String>) {
+        self.last_applied = hash;
+    }
+
+    pub fn last_applied(&self) -> Option<&String> {
+        self.last_applied.as_ref()
+    }
+
+    pub fn top_edges(&self, limit: usize) -> Vec<ResonantEdge> {
+        take_top(&self.edges, limit)
+    }
+
+    pub fn top_influences(&self, limit: usize) -> Vec<Influence> {
+        take_top(&self.influences, limit)
+    }
+
+    pub fn top_tensions(&self, limit: usize) -> Vec<Tension> {
+        take_top(&self.tensions, limit)
+    }
+
+    pub fn truncated(&self, limit: usize) -> ResonantModel {
+        let mut model = self.clone();
+        model.edges = take_top(&model.edges, limit);
+        model.influences = take_top(&model.influences, limit);
+        model.tensions = take_top(&model.tensions, limit);
+        model
+    }
+}
+
+fn take_top<T: Clone>(items: &[T], limit: usize) -> Vec<T> {
+    if limit == 0 {
+        Vec::new()
+    } else {
+        items.iter().take(limit).cloned().collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,6 +112,19 @@ pub enum SyncEvent {
         shared: u32,
         aligned: u32,
         protected: u32,
+    },
+    Build {
+        at_ms: u64,
+        hash: String,
+        cell_count: u32,
+    },
+    Apply {
+        at_ms: u64,
+        hash: Option<String>,
+        cell_count: u32,
+    },
+    Tick {
+        at_ms: u64,
     },
 }
 
@@ -87,12 +161,33 @@ impl SyncLog {
         });
     }
 
+    pub fn record_build(&mut self, hash: String, at_ms: u64, cell_count: u32) {
+        self.push(SyncEvent::Build {
+            at_ms,
+            hash,
+            cell_count,
+        });
+    }
+
+    pub fn record_apply(&mut self, hash: Option<String>, at_ms: u64, cell_count: u32) {
+        self.push(SyncEvent::Apply {
+            at_ms,
+            hash,
+            cell_count,
+        });
+    }
+
+    pub fn record_tick(&mut self, at_ms: u64) {
+        self.push(SyncEvent::Tick { at_ms });
+    }
+
     pub fn total_protected(&self) -> u32 {
         self.entries
             .iter()
             .map(|event| match event {
                 SyncEvent::Dream { protected, .. } => *protected,
                 SyncEvent::Collective { protected, .. } => *protected,
+                _ => 0,
             })
             .sum()
     }
@@ -103,6 +198,7 @@ impl SyncLog {
             .map(|event| match event {
                 SyncEvent::Dream { .. } => 0,
                 SyncEvent::Collective { aligned, .. } => *aligned,
+                _ => 0,
             })
             .sum()
     }
@@ -113,6 +209,7 @@ impl SyncLog {
             .map(|event| match event {
                 SyncEvent::Dream { .. } => 0,
                 SyncEvent::Collective { shared, .. } => *shared,
+                _ => 0,
             })
             .sum()
     }
@@ -133,6 +230,7 @@ impl SyncLog {
                         best = best.max(ratio);
                     }
                 }
+                _ => {}
             }
         }
         best.clamp(0.0, 1.0)
@@ -146,6 +244,15 @@ impl SyncLog {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn truncated(&self, limit: usize) -> SyncLog {
+        let mut clone = self.clone();
+        if clone.entries.len() > limit {
+            let drain = clone.entries.len() - limit;
+            clone.entries.drain(0..drain);
+        }
+        clone
     }
 
     fn push(&mut self, event: SyncEvent) {
