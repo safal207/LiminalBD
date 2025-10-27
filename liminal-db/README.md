@@ -1,4 +1,4 @@
-# LiminalDB v0.2 — «Границы и язык»
+# LiminalDB v0.2
 
 Минимальное живое ядро LiminalDB без внешних зависимостей. Проект состоит из нескольких крейтов:
 
@@ -55,3 +55,5 @@ w memory/seed 0.5
 Паттерны индексируются по простым токенам; клетки реагируют на импульсы, иногда делятся и засыпают.
 
 Остановить приложение можно сочетанием `Ctrl+C`.
+
+[![LiminalDB CI](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml/badge.svg)](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml)
