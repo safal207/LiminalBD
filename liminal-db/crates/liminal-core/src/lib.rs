@@ -4,8 +4,10 @@ pub mod dream_engine;
 pub mod journal;
 pub mod life_loop;
 pub mod lql;
+pub mod mirror;
 pub mod morph_mind;
 pub mod node_cell;
+pub mod recursion;
 pub mod reflex;
 pub mod resonant;
 pub mod security;
@@ -27,8 +29,13 @@ pub use lql::{
     parse_lql, LqlAst, LqlError, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult,
     LqlSubscribeResult, LqlUnsubscribeResult,
 };
+pub use mirror::{
+    rebuild_timeline, record_epoch as build_epoch, top_influencers, Epoch, EpochKind,
+    MirrorTimeline,
+};
 pub use morph_mind::{analyze, hints};
 pub use node_cell::NodeCell;
+pub use recursion::{replay_epoch, replay_epoch_by_id, ReplayConfig, ReplayReport};
 pub use reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule, ReflexWhen};
 pub use resonant::{
     build_model, Influence, ResonantEdge, ResonantModel, SyncEvent, SyncLog, Tension,

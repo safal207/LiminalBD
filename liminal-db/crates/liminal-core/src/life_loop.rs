@@ -6,10 +6,13 @@ use tokio::time::{sleep, Duration};
 
 use crate::awakening::awaken;
 use crate::cluster_field::ClusterField;
+use crate::mirror::{record_epoch, EpochKind};
 use crate::morph_mind::{analyze, hints as gather_hints};
+use crate::recursion::{replay_epoch, ReplayConfig};
 use crate::resonant::build_model;
 use crate::synchrony::{detect_sync_groups, run_collective_dream};
 use crate::types::{Hint, Metrics};
+use serde::Serialize;
 use serde_json::json;
 
 pub async fn run_loop<F, G, H>(
@@ -112,13 +115,18 @@ pub async fn run_loop<F, G, H>(
             last_metrics = Some(metrics.clone());
             elapsed_since_metrics = 0;
         }
-        if let Some(metrics) = last_metrics.as_ref() {
+        if let Some(metrics) = last_metrics.clone() {
             let cfg = guard.dream_config();
             let idle_elapsed = guard.now_ms.saturating_sub(dream_state.last_start_ms);
             if metrics.sleeping_pct > 0.6
                 && metrics.live_load < 0.4
                 && idle_elapsed > (cfg.min_idle_s as u64) * 1_000
             {
+                let metrics_before = metrics.clone();
+                let harmony_before = guard.symmetry_snapshot().metrics;
+                let tension_before = guard.average_tension();
+                let latency_before = metrics_before.avg_latency_ms;
+                let epoch_start = guard.now_ms;
                 if let Some(report) = guard.run_dream_cycle() {
                     dream_state.last_start_ms = guard.now_ms;
                     let original_tick = dream_state.restore_tick.unwrap_or(tick_ms);
@@ -153,6 +161,40 @@ pub async fn run_loop<F, G, H>(
                         })
                         .to_string(),
                     );
+                    let metrics_after = analyze(&guard);
+                    let harmony_after = guard.symmetry_snapshot().metrics;
+                    let tension_after = guard.average_tension();
+                    let latency_after = metrics_after.avg_latency_ms;
+                    let cfg_hash = hash_value(&guard.dream_config());
+                    let report_hash = hash_value(&report);
+                    let epoch = record_epoch(
+                        EpochKind::Dream,
+                        (epoch_start, guard.now_ms),
+                        cfg_hash,
+                        report_hash,
+                        harmony_before,
+                        harmony_after,
+                        tension_before,
+                        tension_after,
+                        latency_before,
+                        latency_after,
+                    );
+                    guard.push_mirror_epoch(epoch.clone());
+                    events.push(format!(
+                        "MIRROR_EPOCH id={} kind={} impact={:.3}",
+                        epoch.id,
+                        epoch.kind.as_str(),
+                        epoch.impact
+                    ));
+                    events.push(
+                        json!({
+                            "ev": "mirror",
+                            "meta": {"epoch": epoch}
+                        })
+                        .to_string(),
+                    );
+                    auto_reflect(&mut *guard, &mut events);
+                    last_metrics = Some(metrics_after);
                     rebuild_and_awaken(&mut *guard, &mut tick_ms, &mut events);
                 }
             }
@@ -167,6 +209,11 @@ pub async fn run_loop<F, G, H>(
                 {
                     let groups = detect_sync_groups(&*guard, &sync_cfg, guard.now_ms);
                     if !groups.is_empty() {
+                        let metrics_before = last_metrics.clone().unwrap_or_default();
+                        let harmony_before = guard.symmetry_snapshot().metrics;
+                        let tension_before = guard.average_tension();
+                        let latency_before = metrics_before.avg_latency_ms;
+                        let epoch_start = guard.now_ms;
                         let now_ms = guard.now_ms;
                         let report = run_collective_dream(&mut *guard, &groups, &sync_cfg, now_ms);
                         events.push(format!(
@@ -186,6 +233,40 @@ pub async fn run_loop<F, G, H>(
                             })
                             .to_string(),
                         );
+                        let metrics_after = analyze(&guard);
+                        let harmony_after = guard.symmetry_snapshot().metrics;
+                        let tension_after = guard.average_tension();
+                        let latency_after = metrics_after.avg_latency_ms;
+                        let cfg_hash = hash_value(&guard.sync_config());
+                        let report_hash = hash_value(&report);
+                        let epoch = record_epoch(
+                            EpochKind::Collective,
+                            (epoch_start, guard.now_ms),
+                            cfg_hash,
+                            report_hash,
+                            harmony_before,
+                            harmony_after,
+                            tension_before,
+                            tension_after,
+                            latency_before,
+                            latency_after,
+                        );
+                        guard.push_mirror_epoch(epoch.clone());
+                        events.push(format!(
+                            "MIRROR_EPOCH id={} kind={} impact={:.3}",
+                            epoch.id,
+                            epoch.kind.as_str(),
+                            epoch.impact
+                        ));
+                        events.push(
+                            json!({
+                                "ev": "mirror",
+                                "meta": {"epoch": epoch}
+                            })
+                            .to_string(),
+                        );
+                        auto_reflect(&mut *guard, &mut events);
+                        last_metrics = Some(metrics_after);
                         rebuild_and_awaken(&mut *guard, &mut tick_ms, &mut events);
                         shared_state.active = true;
                         shared_state.phase_until =
@@ -281,6 +362,11 @@ fn rebuild_and_awaken(field: &mut ClusterField, tick_ms: &mut u64, events: &mut 
         field.clear_resonant_model();
         return;
     }
+    let epoch_start = field.now_ms;
+    let metrics_before = analyze(field);
+    let harmony_before = field.symmetry_snapshot().metrics;
+    let tension_before = field.average_tension();
+    let latency_before = metrics_before.avg_latency_ms;
     let model = build_model(field, field.sync_log(), &history);
     field.set_resonant_model(model.clone());
     let cfg = field.awakening_config();
@@ -316,4 +402,87 @@ fn rebuild_and_awaken(field: &mut ClusterField, tick_ms: &mut u64, events: &mut 
         let adjusted = ((*tick_ms as i64) + report.tick_adjust_ms as i64).clamp(80, 800);
         *tick_ms = adjusted as u64;
     }
+    let metrics_after = analyze(field);
+    let harmony_after = field.symmetry_snapshot().metrics;
+    let tension_after = field.average_tension();
+    let latency_after = metrics_after.avg_latency_ms;
+    let cfg_hash = hash_value(&cfg);
+    let report_hash = hash_value(&report);
+    let epoch = record_epoch(
+        EpochKind::Awaken,
+        (epoch_start, field.now_ms),
+        cfg_hash,
+        report_hash,
+        harmony_before,
+        harmony_after,
+        tension_before,
+        tension_after,
+        latency_before,
+        latency_after,
+    );
+    field.push_mirror_epoch(epoch.clone());
+    events.push(format!(
+        "MIRROR_EPOCH id={} kind={} impact={:.3}",
+        epoch.id,
+        epoch.kind.as_str(),
+        epoch.impact
+    ));
+    events.push(
+        json!({
+            "ev": "mirror",
+            "meta": {"epoch": epoch}
+        })
+        .to_string(),
+    );
+    auto_reflect(field, events);
+}
+
+fn auto_reflect(field: &mut ClusterField, events: &mut Vec<String>) {
+    if !field.mirror_negative_streak(4) {
+        return;
+    }
+    let Some(best) = field
+        .mirror_top_influencers(1)
+        .into_iter()
+        .find(|epoch| epoch.impact > 0.0)
+    else {
+        return;
+    };
+    let cfg = ReplayConfig {
+        mode: "dry".to_string(),
+        scale: 0.75,
+        max_ops: 96,
+        protect_salience: 0.8,
+    };
+    let timeline = field.mirror_timeline();
+    let report = replay_epoch(field, &timeline, best.id, &cfg);
+    events.push(format!(
+        "REPLAY epoch={} mode={} predicted_gain={:.3} applied={}",
+        report.epoch_id, report.mode, report.predicted_gain, report.applied
+    ));
+    events.push(
+        json!({
+            "ev": "replay",
+            "meta": {
+                "epoch_id": report.epoch_id,
+                "mode": report.mode,
+                "applied": report.applied,
+                "predicted_gain": report.predicted_gain,
+                "took_ms": report.took_ms
+            }
+        })
+        .to_string(),
+    );
+}
+
+fn hash_value<T: Serialize>(value: &T) -> u64 {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    hash_bytes(&bytes)
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let digest = blake3::hash(bytes);
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(out)
 }

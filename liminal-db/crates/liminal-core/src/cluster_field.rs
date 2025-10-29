@@ -12,14 +12,16 @@ use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
 use crate::journal::{
     AffinityDelta, AwakenApplyDelta, AwakenTickDelta, CellSnapshot, CollectiveDreamReportDelta,
     DivideDelta, DreamEdgeDelta, DreamLinkDelta, DreamReportDelta, EnergyDelta, EventDelta,
-    Journal, LinkDelta, ModelBuildDelta, StateDelta, SyncAlignDelta, SyncShareDelta, TickDelta,
-    TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
+    Journal, LinkDelta, MirrorEpochDelta, MirrorReplayDelta, ModelBuildDelta, StateDelta,
+    SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
     LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
     LqlUnsubscribeResult,
 };
+use crate::mirror::{Epoch, EpochKind, MirrorTimeline};
 use crate::node_cell::NodeCell;
+use crate::recursion::ReplayReport;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
 use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
@@ -64,6 +66,8 @@ pub struct ClusterField {
     reflex_engine: ReflexEngine,
     important_cells: HashSet<NodeId>,
     noradrenaline: Option<NoradrenalineEffect>,
+    mirror_epochs: VecDeque<Epoch>,
+    mirror_replays: VecDeque<ReplayReport>,
     pub resonant_model: ResonantModel,
 }
 
@@ -89,6 +93,8 @@ const DEFAULT_WINDOW_MS: u32 = 1_000;
 const DEFAULT_VIEW_EVERY_MS: u32 = 1_000;
 const MAX_RECENT_ROUTES: usize = 96;
 const ROUTE_RETENTION_MS: u64 = 90_000;
+const MIRROR_EPOCH_LIMIT: usize = 256;
+const MIRROR_REPLAY_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HarmonyTuning {
@@ -152,6 +158,8 @@ impl ClusterField {
             reflex_engine: ReflexEngine::new(2_000),
             important_cells: HashSet::new(),
             noradrenaline: None,
+            mirror_epochs: VecDeque::new(),
+            mirror_replays: VecDeque::new(),
             resonant_model: ResonantModel::default(),
         }
     }
@@ -683,6 +691,44 @@ impl ClusterField {
                         "introspect_tension": {
                             "limit": limit,
                             "tensions": tensions,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectEpochs { top_n } => {
+                let limit = top_n.unwrap_or(DEFAULT_INTROSPECT_TOP_N);
+                let epochs = self.mirror_top_influencers(limit);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_epochs": {
+                            "limit": limit,
+                            "epochs": epochs,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::IntrospectEpoch { id } => {
+                let epoch = self
+                    .mirror_epochs_iter()
+                    .find(|epoch| epoch.id == id)
+                    .cloned();
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "introspect_epoch": {
+                            "id": id,
+                            "epoch": epoch,
                         }
                     }
                 })
@@ -1893,6 +1939,112 @@ impl ClusterField {
         self.reflex_engine.snapshot()
     }
 
+    pub fn mirror_epochs_iter(&self) -> impl Iterator<Item = &Epoch> {
+        self.mirror_epochs.iter()
+    }
+
+    pub fn mirror_timeline(&self) -> MirrorTimeline {
+        MirrorTimeline {
+            epochs: self.mirror_epochs.iter().cloned().collect(),
+            built_ms: self.now_ms,
+        }
+    }
+
+    pub fn push_mirror_epoch(&mut self, epoch: Epoch) {
+        if let Some(journal) = &self.journal {
+            journal.append_delta(&EventDelta::MirrorEpoch(MirrorEpochDelta {
+                epoch: epoch.clone(),
+            }));
+        }
+        self.mirror_epochs.push_back(epoch);
+        while self.mirror_epochs.len() > MIRROR_EPOCH_LIMIT {
+            self.mirror_epochs.pop_front();
+        }
+    }
+
+    pub fn record_mirror_replay(&mut self, report: ReplayReport) {
+        if let Some(journal) = &self.journal {
+            journal.append_delta(&EventDelta::MirrorReplay(MirrorReplayDelta {
+                report: report.clone(),
+            }));
+        }
+        self.mirror_replays.push_back(report);
+        while self.mirror_replays.len() > MIRROR_REPLAY_LIMIT {
+            self.mirror_replays.pop_front();
+        }
+    }
+
+    pub fn mirror_negative_streak(&self, window: usize) -> bool {
+        if window == 0 || self.mirror_epochs.len() < window {
+            return false;
+        }
+        self.mirror_epochs
+            .iter()
+            .rev()
+            .take(window)
+            .all(|epoch| epoch.impact <= 0.0)
+    }
+
+    pub fn mirror_recent_impacts(&self, window: usize) -> Vec<f32> {
+        if window == 0 {
+            return Vec::new();
+        }
+        self.mirror_epochs
+            .iter()
+            .rev()
+            .take(window)
+            .map(|epoch| epoch.impact)
+            .collect()
+    }
+
+    pub fn mirror_top_influencers(&self, k: usize) -> Vec<Epoch> {
+        crate::mirror::top_influencers(&self.mirror_timeline(), k)
+    }
+
+    pub fn apply_mirror_epoch(
+        &mut self,
+        epoch: &Epoch,
+        scale: f32,
+        max_ops: u32,
+        protect_salience: f32,
+    ) -> u32 {
+        if max_ops == 0 {
+            return 0;
+        }
+        let mut applied = 0u32;
+        let protect = protect_salience.clamp(0.0, 1.0);
+        let scale = scale.clamp(-4.0, 4.0);
+        let affinity_delta = (0.06 * scale).clamp(-0.35, 0.35);
+        let metabolism_delta = (0.03 * scale).clamp(-0.2, 0.2);
+        for cell in self.cells.values_mut() {
+            if cell.salience >= protect {
+                continue;
+            }
+            if matches!(epoch.kind, EpochKind::Awaken) {
+                cell.metabolism = (cell.metabolism * (1.0 - metabolism_delta)).clamp(0.05, 2.5);
+            }
+            cell.affinity = (cell.affinity * (1.0 + affinity_delta)).clamp(0.0, 2.0);
+            applied = applied.saturating_add(1);
+            if applied >= max_ops {
+                break;
+            }
+        }
+        applied
+    }
+
+    pub fn average_tension(&self) -> f32 {
+        if self.resonant_model.tensions.is_empty() {
+            return 0.0;
+        }
+        let total: f32 = self
+            .resonant_model
+            .tensions
+            .iter()
+            .map(|t| t.magnitude)
+            .sum();
+        total / (self.resonant_model.tensions.len() as f32)
+    }
+
     pub fn set_mirror_interval(&mut self, interval_ms: u64) {
         self.reflex_engine.set_interval(interval_ms);
     }
@@ -2062,6 +2214,18 @@ impl ClusterField {
                     }
                 }
             }
+            EventDelta::MirrorEpoch(delta) => {
+                self.mirror_epochs.push_back(delta.epoch.clone());
+                while self.mirror_epochs.len() > MIRROR_EPOCH_LIMIT {
+                    self.mirror_epochs.pop_front();
+                }
+            }
+            EventDelta::MirrorReplay(delta) => {
+                self.mirror_replays.push_back(delta.report.clone());
+                while self.mirror_replays.len() > MIRROR_REPLAY_LIMIT {
+                    self.mirror_replays.pop_front();
+                }
+            }
         }
     }
 }
@@ -2110,10 +2274,10 @@ mod tests {
     #![allow(dead_code, unnameable_test_items)]
 
     use super::*;
+    use crate::reflex::ReflexWhen;
     use crate::resonant::{
         Influence as ResonantInfluence, ResonantEdge, Tension as ResonantTension,
     };
-    use crate::reflex::ReflexWhen;
     use crate::types::Hint;
     use serde_json::Value;
 

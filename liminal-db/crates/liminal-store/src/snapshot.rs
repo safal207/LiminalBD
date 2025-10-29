@@ -1,12 +1,13 @@
 use anyhow::Result;
 use liminal_core::{
-    AwakeningConfig, CellSnapshot, ClusterField, DreamConfig, NodeCell, ReflexRule, ResonantModel,
-    SeedParams, SyncConfig, SyncLog, TrsState,
+    AwakeningConfig, CellSnapshot, ClusterField, DreamConfig, MirrorTimeline, NodeCell, ReflexRule,
+    ResonantModel, SeedParams, SyncConfig, SyncLog, TrsState,
 };
 use serde::{Deserialize, Serialize};
 
 const RESONANT_SNAPSHOT_LIMIT: usize = 48;
 const SYNCLOG_SNAPSHOT_LIMIT: usize = 96;
+const MIRROR_SNAPSHOT_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotEnvelope {
@@ -31,6 +32,8 @@ struct SnapshotEnvelope {
     sync_log: Option<SyncLog>,
     #[serde(default)]
     last_awaken_tick: u64,
+    #[serde(default)]
+    mirror: Option<MirrorTimeline>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +50,7 @@ pub struct ClusterFieldSeed {
     pub resonant: ResonantModel,
     pub sync_log: SyncLog,
     pub last_awaken_tick: u64,
+    pub mirror: MirrorTimeline,
 }
 
 impl ClusterFieldSeed {
@@ -82,6 +86,10 @@ impl ClusterFieldSeed {
             self.last_awaken_tick,
         );
         field.rebuild_caches();
+        let mirror_epochs = self.mirror.epochs;
+        for epoch in mirror_epochs {
+            field.push_mirror_epoch(epoch);
+        }
         field
     }
 }
@@ -108,6 +116,10 @@ pub fn create_snapshot(cluster: &ClusterField) -> Result<Vec<u8>> {
             .map(|model| model.truncated(RESONANT_SNAPSHOT_LIMIT)),
         sync_log: Some(cluster.sync_log().truncated(SYNCLOG_SNAPSHOT_LIMIT)),
         last_awaken_tick: cluster.last_awaken_tick(),
+        mirror: Some(truncate_timeline(
+            &cluster.mirror_timeline(),
+            MIRROR_SNAPSHOT_LIMIT,
+        )),
     };
     Ok(serde_cbor::to_vec(&envelope)?)
 }
@@ -127,7 +139,20 @@ pub fn load_snapshot(bytes: &[u8]) -> Result<ClusterFieldSeed> {
         resonant: envelope.resonant.unwrap_or_default(),
         sync_log: envelope.sync_log.unwrap_or_default(),
         last_awaken_tick: envelope.last_awaken_tick,
+        mirror: envelope.mirror.unwrap_or_default(),
     })
+}
+
+fn truncate_timeline(timeline: &MirrorTimeline, limit: usize) -> MirrorTimeline {
+    if timeline.epochs.len() <= limit {
+        return timeline.clone();
+    }
+    let mut epochs: Vec<_> = timeline.epochs.iter().rev().take(limit).cloned().collect();
+    epochs.reverse();
+    MirrorTimeline {
+        epochs,
+        built_ms: timeline.built_ms,
+    }
 }
 
 fn snapshot_to_node(snapshot: &CellSnapshot) -> NodeCell {

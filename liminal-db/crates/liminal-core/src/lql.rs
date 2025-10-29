@@ -29,6 +29,12 @@ pub enum LqlAst {
     IntrospectTension {
         top_n: Option<usize>,
     },
+    IntrospectEpochs {
+        top_n: Option<usize>,
+    },
+    IntrospectEpoch {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,11 +134,35 @@ where
         .next()
         .ok_or_else(|| LqlError::new("INTROSPECT requires a target"))?;
     let rest: Vec<&str> = parts.collect();
-    let top_n = parse_top_clause(&rest)?;
     match target.to_uppercase().as_str() {
-        "MODEL" => Ok(LqlAst::IntrospectModel { top_n }),
-        "INFLUENCE" => Ok(LqlAst::IntrospectInfluence { top_n }),
-        "TENSION" => Ok(LqlAst::IntrospectTension { top_n }),
+        "MODEL" => {
+            let top_n = parse_top_clause(&rest)?;
+            Ok(LqlAst::IntrospectModel { top_n })
+        }
+        "INFLUENCE" => {
+            let top_n = parse_top_clause(&rest)?;
+            Ok(LqlAst::IntrospectInfluence { top_n })
+        }
+        "TENSION" => {
+            let top_n = parse_top_clause(&rest)?;
+            Ok(LqlAst::IntrospectTension { top_n })
+        }
+        "EPOCHS" => {
+            let top_n = parse_top_clause(&rest)?;
+            Ok(LqlAst::IntrospectEpochs { top_n })
+        }
+        "EPOCH" => {
+            if rest.is_empty() {
+                return Err(LqlError::new("INTROSPECT EPOCH requires an id"));
+            }
+            if rest.len() > 1 {
+                return Err(LqlError::new("INTROSPECT EPOCH takes a single id"));
+            }
+            let id: u64 = rest[0]
+                .parse()
+                .map_err(|_| LqlError::new("INTROSPECT EPOCH id must be numeric"))?;
+            Ok(LqlAst::IntrospectEpoch { id })
+        }
         other => Err(LqlError::new(format!(
             "unexpected INTROSPECT target: {}",
             other

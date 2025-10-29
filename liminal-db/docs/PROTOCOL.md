@@ -198,6 +198,9 @@ lql SUBSCRIBE * WHERE adreno=true WINDOW 60000 EVERY 5000
 {"cmd":"lql","q":"SELECT cpu/load WHERE strength>=0.7 WINDOW 1000"}
 {"cmd":"dream.now"}
 {"cmd":"dream.set","cfg":{"min_idle_s":10,"window_ms":4000}}
+{"cmd":"mirror.timeline","top":20}
+{"cmd":"mirror.influencers","k":8}
+{"cmd":"mirror.replay","epoch_id":128,"cfg":{"mode":"dry","scale":0.6,"max_ops":64}}
 ```
 
 События ядра:
@@ -405,3 +408,66 @@ a26365767476696577a26d736f75726365637773a26d7374617473a362636f756e74
 ```
 
 При запуске без `--nexus-client` CLI поднимает локальный сервер. С флагом `--nexus-client <url>` CLI подключается к внешнему Nexus и реплицирует полученные события в локальный поток.
+
+### Mirror Timeline & Temporal Recursion
+
+С версии v1.1 ядро отслеживает эволюцию состояния через **эпохи**. Каждая эпоха — срез одного цикла сна, коллективной синхронизации или пробуждения.
+
+```
+Epoch {
+  id: u64,
+  kind: "dream" | "collective" | "awaken",
+  start_ms: u64,
+  end_ms: u64,
+  cfg_hash: u64,
+  report_hash: u64,
+  harmony_before: { avg_strength: f32, avg_latency: f32, entropy: f32 },
+  harmony_after:  { ... },
+  tension_before: f32,
+  tension_after: f32,
+  latency_avg_before: f32,
+  latency_avg_after: f32,
+  impact: f32
+}
+```
+
+`MirrorTimeline` хранит последние эпохи (`epochs: [Epoch]`, `built_ms`). Snapshot сохраняет до 64 записей; лимит кольца в рантайме — 256.
+
+**ReplayConfig** описывает "зеркальный" прогон прошлой эпохи:
+
+```
+ReplayConfig {
+  mode: "dry" | "apply",
+  scale: f32,
+  max_ops: u32,
+  protect_salience: f32
+}
+```
+
+* `dry` – симуляция без побочных эффектов (результат публикуется как событие `replay`).
+* `apply` – масштабированное применение изменений (по умолчанию защищаются узлы с `salience >= protect_salience`).
+
+Веб-сокет и ABI поддерживают команды:
+
+* `{"cmd":"mirror.timeline","top":50}` — вернуть последние `top` эпох (если поле отсутствует — весь доступный хвост).
+* `{"cmd":"mirror.influencers","k":10}` — эпохи с максимальным `impact`.
+* `{"cmd":"mirror.replay","epoch_id":123,"cfg":{"mode":"apply","scale":0.5,"max_ops":48}}` — запустить зеркальный прогон.
+
+События:
+
+```
+{"ev":"mirror","meta":{"epoch": Epoch}}
+{"ev":"replay","meta":{"epoch_id":u64,"mode":"dry","applied":u32,"predicted_gain":f32,"took_ms":u32}}
+```
+
+CLI предоставляет команды:
+
+```
+:mirror timeline [top N]
+:mirror top [N]
+:mirror replay <epoch_id> [dry|apply] [scale <f>]
+:mirror stats [N]
+```
+
+LQL расширен запросами `INTROSPECT EPOCHS TOP <n>` и `INTROSPECT EPOCH <id>` для доступа к тем же данным.
+
