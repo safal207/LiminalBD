@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use liminal_core::types::{Hint, Impulse as CoreImpulse, ImpulseKind, Metrics as CoreMetrics};
-use liminal_core::{AwakeningConfig, DreamConfig, SyncConfig, TrsConfig};
+use liminal_core::{AwakeningConfig, DreamConfig, ReplayConfig, SyncConfig, TrsConfig};
 use serde::{Deserialize, Serialize};
 use serde_cbor::Value;
 use serde_json::Value as JsonValue;
@@ -67,6 +67,23 @@ pub enum ProtocolCommand {
     AwakenGet,
     #[serde(rename = "introspect")]
     Introspect(IntrospectRequest),
+    #[serde(rename = "mirror.timeline")]
+    MirrorTimeline {
+        #[serde(rename = "top", skip_serializing_if = "Option::is_none")]
+        top: Option<u32>,
+    },
+    #[serde(rename = "mirror.influencers")]
+    MirrorInfluencers {
+        #[serde(rename = "k", skip_serializing_if = "Option::is_none")]
+        k: Option<u32>,
+    },
+    #[serde(rename = "mirror.replay")]
+    MirrorReplay {
+        #[serde(rename = "epoch_id")]
+        epoch_id: u64,
+        #[serde(rename = "cfg", skip_serializing_if = "Option::is_none")]
+        cfg: Option<ReplayConfig>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,7 +338,7 @@ pub fn event_from_impulse_log(log: &str) -> Option<ProtocolEvent> {
     None
 }
 
-fn event_from_json(json: &JsonValue, tick_ms: u32) -> Option<ProtocolEvent> {
+pub(crate) fn event_from_json(json: &JsonValue, tick_ms: u32) -> Option<ProtocolEvent> {
     let ev = json.get("ev")?.as_str()?.to_string();
     let id = if let Some(id_val) = json.get("id") {
         json_value_to_event_id(id_val).unwrap_or(EventId::Text(ev.clone()))
