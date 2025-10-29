@@ -20,9 +20,10 @@ use liminal_bridge_net::{
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
-    detect_sync_groups, parse_lql, run_collective_dream, AwakeningConfig, AwakeningReport,
-    ClusterField, DreamConfig, HarmonySnapshot, Influence, LqlResponse, ReflexAction, ReflexRule,
-    ReflexWhen, ResonantModel, SyncConfig, Tension, TrsConfig, ViewStats,
+    detect_sync_groups, parse_lql, replay_epoch_by_id, run_collective_dream, AwakeningConfig,
+    AwakeningReport, ClusterField, DreamConfig, Epoch, HarmonySnapshot, Influence, LqlResponse,
+    MirrorTimeline, ReflexAction, ReflexRule, ReflexWhen, ReplayConfig, ReplayReport,
+    ResonantModel, SyncConfig, Tension, TrsConfig, ViewStats,
 };
 #[cfg(test)]
 use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
@@ -475,6 +476,16 @@ async fn run_interactive(
                             eprintln!("sync command failed: {err}");
                         }
                     }
+                    command if command.starts_with("mirror") => {
+                        if let Err(err) = handle_mirror_command(
+                            command.trim_start_matches("mirror").trim(),
+                            &field_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("mirror command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -836,6 +847,115 @@ async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) 
             Ok(())
         }
         other => Err(anyhow!("unknown trs subcommand: {}", other)),
+    }
+}
+
+async fn handle_mirror_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            eprintln!(
+                "usage: :mirror <timeline|top|replay|stats> [options]\n  timeline [top N]\n  top [N]\n  replay <epoch_id> [dry|apply] [scale <f>]\n  stats [N]"
+            );
+            Ok(())
+        }
+        "timeline" => {
+            let mut limit: Option<usize> = None;
+            if let Some(arg) = parts.next() {
+                if arg.eq_ignore_ascii_case("top") {
+                    if let Some(value) = parts.next() {
+                        limit = Some(value.parse()?);
+                    }
+                } else {
+                    limit = Some(arg.parse()?);
+                }
+            }
+            let timeline = {
+                let guard = field.lock().await;
+                guard.mirror_timeline()
+            };
+            print_mirror_timeline(&timeline, limit);
+            Ok(())
+        }
+        "top" => {
+            let count = parts
+                .next()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(10);
+            let epochs = {
+                let guard = field.lock().await;
+                guard.mirror_top_influencers(count)
+            };
+            if epochs.is_empty() {
+                println!("MIRROR_TOP none");
+            } else {
+                for epoch in epochs {
+                    println!("{}", render_mirror_epoch(&epoch));
+                }
+            }
+            Ok(())
+        }
+        "replay" => {
+            let epoch_id_str = parts.next().ok_or_else(|| {
+                anyhow!("usage: :mirror replay <epoch_id> [dry|apply] [scale <f>]")
+            })?;
+            let epoch_id = epoch_id_str.parse::<u64>()?;
+            let mut cfg = ReplayConfig::default();
+            let remaining: Vec<&str> = parts.collect();
+            let mut idx = 0;
+            while idx < remaining.len() {
+                let token = remaining[idx];
+                match token.to_lowercase().as_str() {
+                    "dry" | "apply" => {
+                        cfg.mode = token.to_lowercase();
+                        idx += 1;
+                    }
+                    "scale" => {
+                        let value = remaining
+                            .get(idx + 1)
+                            .ok_or_else(|| anyhow!("scale requires a value"))?;
+                        cfg.scale = value.parse()?;
+                        idx += 2;
+                    }
+                    other => {
+                        return Err(anyhow!("unknown replay option: {}", other));
+                    }
+                }
+            }
+            let report = {
+                let mut guard = field.lock().await;
+                replay_epoch_by_id(&mut *guard, epoch_id, &cfg)
+            };
+            print_replay_report(&report);
+            Ok(())
+        }
+        "stats" => {
+            let window = parts
+                .next()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(10);
+            let impacts = {
+                let guard = field.lock().await;
+                guard.mirror_recent_impacts(window)
+            };
+            if impacts.is_empty() {
+                println!("MIRROR_STATS none");
+            } else {
+                let total: f32 = impacts.iter().sum();
+                let avg = total / impacts.len() as f32;
+                let positives = impacts.iter().filter(|v| **v > 0.0).count();
+                println!(
+                    "MIRROR_STATS window={} avg={:.3} pos={} neg={}",
+                    impacts.len(),
+                    avg,
+                    positives,
+                    impacts.len() - positives
+                );
+            }
+            Ok(())
+        }
+        other => Err(anyhow!("unknown mirror subcommand: {}", other)),
     }
 }
 
@@ -1382,6 +1502,34 @@ async fn handle_network_command(
             }
             println!("{}", serde_json::to_string_pretty(&event)?);
             ws_publish_event(event);
+        }
+        IncomingCommand::MirrorTimeline { top } => {
+            let timeline = { field.lock().await.mirror_timeline() };
+            print_mirror_timeline(&timeline, top.map(|v| v as usize));
+        }
+        IncomingCommand::MirrorInfluencers { k } => {
+            let epochs = {
+                let guard = field.lock().await;
+                guard.mirror_top_influencers(k.unwrap_or(10) as usize)
+            };
+            if epochs.is_empty() {
+                println!("MIRROR_TOP none");
+            } else {
+                for epoch in epochs {
+                    println!("{}", render_mirror_epoch(&epoch));
+                }
+            }
+        }
+        IncomingCommand::MirrorReplay { epoch_id, cfg } => {
+            let cfg_value = cfg
+                .map(|value| serde_json::from_value::<ReplayConfig>(value))
+                .transpose()?;
+            let cfg = cfg_value.unwrap_or_default();
+            let report = {
+                let mut guard = field.lock().await;
+                replay_epoch_by_id(&mut *guard, epoch_id, &cfg)
+            };
+            print_replay_report(&report);
         }
         IncomingCommand::Raw(value) => {
             println!("WS RAW {}", value);
@@ -1979,6 +2127,44 @@ fn format_introspect_event(event: &JsonValue) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+fn print_mirror_timeline(timeline: &MirrorTimeline, limit: Option<usize>) {
+    let mut epochs = timeline.epochs.clone();
+    if let Some(limit) = limit {
+        if epochs.len() > limit {
+            epochs = epochs.into_iter().rev().take(limit).collect::<Vec<_>>();
+            epochs.reverse();
+        }
+    }
+    if epochs.is_empty() {
+        println!("MIRROR_TIMELINE empty");
+        return;
+    }
+    for epoch in epochs {
+        println!("{}", render_mirror_epoch(&epoch));
+    }
+}
+
+fn render_mirror_epoch(epoch: &Epoch) -> String {
+    let tension_delta = epoch.tension_before - epoch.tension_after;
+    let latency_delta = epoch.latency_avg_before - epoch.latency_avg_after;
+    format!(
+        "MIRROR_EPOCH id={} kind={} impact={:.3} tension_delta={:.3} latency_delta={:.2} duration={}ms",
+        epoch.id,
+        epoch.kind.as_str(),
+        epoch.impact,
+        tension_delta,
+        latency_delta,
+        epoch.duration()
+    )
+}
+
+fn print_replay_report(report: &ReplayReport) {
+    println!(
+        "REPLAY epoch={} mode={} predicted_gain={:.3} applied={} took={}ms",
+        report.epoch_id, report.mode, report.predicted_gain, report.applied, report.took_ms
+    );
 }
 
 fn render_harmony_snapshot_line(snapshot: &HarmonySnapshot) -> String {

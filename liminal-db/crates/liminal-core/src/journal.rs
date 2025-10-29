@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::awakening::AwakeningConfig;
 use crate::dream_engine::{DreamConfig, DreamReport};
+use crate::mirror::Epoch;
+use crate::recursion::ReplayReport;
 use crate::reflex::{ReflexFire, ReflexId, ReflexRule};
 use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::TrsConfig;
@@ -74,6 +76,10 @@ pub enum EventDelta {
     AwakenApply(AwakenApplyDelta),
     #[serde(rename = "awaken_tick")]
     AwakenTick(AwakenTickDelta),
+    #[serde(rename = "mirror_epoch")]
+    MirrorEpoch(MirrorEpochDelta),
+    #[serde(rename = "mirror_replay")]
+    MirrorReplay(MirrorReplayDelta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +202,16 @@ pub struct TrsHarmonyDelta {
     pub affinity_scale: f32,
     pub metabolism_scale: f32,
     pub sleep_delta: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorEpochDelta {
+    pub epoch: Epoch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorReplayDelta {
+    pub report: ReplayReport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -240,6 +240,37 @@ pub async fn start_ws_server(field: Arc<Mutex<ClusterField>>, addr: &str) -> Res
                                                 warn!("ws_server.invalid_introspect_target");
                                             }
                                         }
+                                        "mirror.timeline" => {
+                                            let top = value
+                                                .get("top")
+                                                .and_then(|v| v.as_u64())
+                                                .map(|v| v.min(u32::MAX as u64) as u32);
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::MirrorTimeline { top })
+                                                .await;
+                                        }
+                                        "mirror.influencers" => {
+                                            let k = value
+                                                .get("k")
+                                                .and_then(|v| v.as_u64())
+                                                .map(|v| v.min(u32::MAX as u64) as u32);
+                                            let _ = cmd_tx
+                                                .send(IncomingCommand::MirrorInfluencers { k })
+                                                .await;
+                                        }
+                                        "mirror.replay" => {
+                                            if let Some(epoch_id) = value.get("epoch_id").and_then(|v| v.as_u64()) {
+                                                let cfg = value.get("cfg").cloned();
+                                                let _ = cmd_tx
+                                                    .send(IncomingCommand::MirrorReplay {
+                                                        epoch_id,
+                                                        cfg,
+                                                    })
+                                                    .await;
+                                            } else {
+                                                warn!("ws_server.mirror_replay_missing_id");
+                                            }
+                                        }
                                         other => {
                                             warn!(command = %other, "ws_server.unknown_cmd");
                                             let _ = cmd_tx.send(IncomingCommand::Raw(value.clone())).await;

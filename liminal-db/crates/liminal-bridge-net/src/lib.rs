@@ -53,6 +53,16 @@ pub enum IncomingCommand {
         target: IntrospectTarget,
         top: Option<u32>,
     },
+    MirrorTimeline {
+        top: Option<u32>,
+    },
+    MirrorInfluencers {
+        k: Option<u32>,
+    },
+    MirrorReplay {
+        epoch_id: u64,
+        cfg: Option<JsonValue>,
+    },
     Raw(JsonValue),
 }
 

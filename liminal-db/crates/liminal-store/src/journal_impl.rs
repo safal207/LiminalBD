@@ -223,7 +223,10 @@ mod tests {
         }
 
         assert_eq!(restored.awakening_config(), field.awakening_config());
-        assert_eq!(restored.resonant_model().cloned(), field.resonant_model().cloned());
+        assert_eq!(
+            restored.resonant_model().cloned(),
+            field.resonant_model().cloned()
+        );
         assert_eq!(restored.sync_log().clone(), field.sync_log().clone());
         assert_eq!(restored.last_awaken_tick(), field.last_awaken_tick());
     }

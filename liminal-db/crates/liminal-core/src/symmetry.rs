@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cluster_field::{ClusterField, Hit};
 
-#[derive(Debug, Clone, Copy, Serialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct HarmonyMetrics {
     pub avg_strength: f32,
     pub avg_latency: f32,
