@@ -2513,8 +2513,8 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.influences = vec![ResonantInfluence {
             source: 5,
-            target: 6,
-            impact: 0.66,
+            sink: 6,
+            weight: 0.66,
             ..Default::default()
         }];
         let exec = field
@@ -2531,7 +2531,7 @@ mod tests {
             .expect("influences array");
         assert_eq!(influences.len(), 1);
         assert_eq!(influences[0]["source"].as_u64(), Some(5));
-        assert_eq!(influences[0]["target"].as_u64(), Some(6));
+        assert_eq!(influences[0]["sink"].as_u64(), Some(6));
     }
 
     #[test]
@@ -2539,16 +2539,14 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.tensions = vec![
             ResonantTension {
-                from: 8,
-                to: 9,
-                tension: 0.55,
-                ..Default::default()
+                node: 8,
+                magnitude: 0.55,
+                relief: 0.1,
             },
             ResonantTension {
-                from: 10,
-                to: 11,
-                tension: 0.52,
-                ..Default::default()
+                node: 11,
+                magnitude: 0.52,
+                relief: 0.2,
             },
         ];
         let exec = field
@@ -2559,8 +2557,8 @@ mod tests {
             .as_array()
             .expect("tensions array");
         assert_eq!(tensions.len(), 2);
-        assert_eq!(tensions[0]["from"].as_u64(), Some(8));
-        assert_eq!(tensions[1]["to"].as_u64(), Some(11));
+        assert_eq!(tensions[0]["node"].as_u64(), Some(8));
+        assert_eq!(tensions[1]["node"].as_u64(), Some(11));
     }
 
     #[test]

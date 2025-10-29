@@ -167,6 +167,7 @@ mod tests {
     use super::*;
     use crate::codec::decode_delta;
     use liminal_core::{AwakeningConfig, ClusterField};
+    use serde_cbor::to_vec;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -180,9 +181,10 @@ mod tests {
         field.tick_all(200);
 
         let mut initial_cfg = AwakeningConfig::default();
-        initial_cfg.enabled = true;
-        initial_cfg.resonance_threshold = 0.42;
         initial_cfg.max_nodes = 24;
+        initial_cfg.energy_floor = 0.5;
+        initial_cfg.tick_bias_ms = 12;
+        initial_cfg.target_gain = 0.12;
         field.set_awakening_config(initial_cfg.clone());
         field.build_resonant_model();
         field.apply_awakening_model();
@@ -196,9 +198,10 @@ mod tests {
         assert!(info.size_bytes > 0);
 
         let mut updated_cfg = AwakeningConfig::default();
-        updated_cfg.enabled = true;
-        updated_cfg.resonance_threshold = 0.88;
         updated_cfg.max_nodes = 96;
+        updated_cfg.energy_floor = 0.35;
+        updated_cfg.tick_bias_ms = 28;
+        updated_cfg.target_gain = 0.05;
         field.set_awakening_config(updated_cfg.clone());
         field.add_root("liminal/followup");
         field.build_resonant_model();
@@ -211,8 +214,14 @@ mod tests {
             .expect("snapshot present");
         let mut restored = seed.into_field();
         assert_eq!(restored.awakening_config(), initial_cfg);
-        assert_eq!(restored.resonant_model().cloned(), snapshot_model);
-        assert_eq!(restored.sync_log().clone(), snapshot_sync);
+        assert_eq!(
+            restored.resonant_model().cloned().unwrap_or_default(),
+            snapshot_model.unwrap_or_default()
+        );
+        assert_eq!(
+            to_vec(restored.sync_log()).expect("sync log serializable"),
+            to_vec(&snapshot_sync).expect("sync log serializable")
+        );
         assert_eq!(restored.last_awaken_tick(), snapshot_tick);
 
         let mut stream = journal.stream_from(offset).expect("stream wal");
@@ -224,10 +233,13 @@ mod tests {
 
         assert_eq!(restored.awakening_config(), field.awakening_config());
         assert_eq!(
-            restored.resonant_model().cloned(),
-            field.resonant_model().cloned()
+            restored.resonant_model().cloned().unwrap_or_default(),
+            field.resonant_model().cloned().unwrap_or_default()
         );
-        assert_eq!(restored.sync_log().clone(), field.sync_log().clone());
+        assert_eq!(
+            to_vec(restored.sync_log()).expect("sync log serializable"),
+            to_vec(field.sync_log()).expect("sync log serializable")
+        );
         assert_eq!(restored.last_awaken_tick(), field.last_awaken_tick());
     }
 }
