@@ -486,6 +486,27 @@ async fn run_interactive(
                             eprintln!("mirror command failed: {err}");
                         }
                     }
+                    command if command.starts_with("peers") => {
+                        if let Err(err) = handle_peer_command(
+                            command.trim_start_matches("peers").trim(),
+                            &remote_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("peers command failed: {err}");
+                        }
+                    }
+                    command if command.starts_with("noetic") => {
+                        if let Err(err) = handle_noetic_command(
+                            command.trim_start_matches("noetic").trim(),
+                            &field_for_cli,
+                            &remote_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("noetic command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -1588,6 +1609,157 @@ async fn handle_ws_command(command: &str, remote: &StdArc<Mutex<Option<WsHandle>
         }
     }
     Ok(())
+}
+
+async fn handle_peer_command(
+    command: &str,
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            println!("PEERS usage: :peers add <url> [credence] [ns <name>] | :peers list");
+        }
+        "add" => {
+            let url = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :peers add <url> [credence] [ns <name>]"))?;
+            let credence = parts
+                .next()
+                .and_then(|value| value.parse::<f32>().ok())
+                .map(|value| value.clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            let mut namespace: Option<String> = None;
+            let mut iter = parts.peekable();
+            while let Some(token) = iter.next() {
+                if token.eq_ignore_ascii_case("ns") {
+                    if let Some(value) = iter.next() {
+                        namespace = Some(value.to_string());
+                    }
+                }
+            }
+            let payload = json!({
+                "cmd": "peer.add",
+                "peer": {
+                    "url": url,
+                    "credence": credence,
+                    "ns": namespace,
+                }
+            });
+            send_remote_command(remote, payload).await?;
+            println!("PEERS add url={url} credence={credence:.2}");
+        }
+        "list" => {
+            let payload = json!({ "cmd": "peer.list" });
+            send_remote_command(remote, payload).await?;
+            println!("PEERS list requested");
+        }
+        other => {
+            return Err(anyhow!("unknown peers subcommand: {other}"));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_noetic_command(
+    command: &str,
+    field: &StdArc<Mutex<ClusterField>>,
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            println!(
+                "NOETIC usage: :noetic propose model | :noetic propose seed <id> | :noetic propose policy <json> | :noetic quorum <value>"
+            );
+        }
+        "propose" => {
+            let kind = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :noetic propose <model|seed|policy> ..."))?;
+            match kind {
+                "model" => {
+                    let snapshot = {
+                        let guard = field.lock().await;
+                        guard
+                            .resonant_model()
+                            .cloned()
+                            .unwrap_or_else(ResonantModel::default)
+                            .truncated(32)
+                    };
+                    let data = serde_json::to_value(snapshot)?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "model",
+                        "data": data,
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose model sent");
+                }
+                "seed" => {
+                    let seed_id = parts
+                        .next()
+                        .ok_or_else(|| anyhow!("usage: :noetic propose seed <seed_id>"))?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "seed",
+                        "data": {"id": seed_id},
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose seed id={seed_id}");
+                }
+                "policy" => {
+                    let raw = parts.collect::<Vec<_>>().join(" ");
+                    if raw.trim().is_empty() {
+                        return Err(anyhow!("usage: :noetic propose policy <json>"));
+                    }
+                    let value: JsonValue = serde_json::from_str(&raw)?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "policy",
+                        "data": value,
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose policy queued");
+                }
+                other => {
+                    return Err(anyhow!("unknown noetic object: {other}"));
+                }
+            }
+        }
+        "quorum" => {
+            let value_raw = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :noetic quorum <0..1>"))?;
+            let q = value_raw
+                .parse::<f32>()
+                .map_err(|_| anyhow!("invalid quorum value"))?;
+            let q = q.clamp(0.0, 1.0);
+            let payload = json!({ "cmd": "noetic.quorum", "q": q });
+            send_remote_command(remote, payload).await?;
+            println!("NOETIC quorum set to {q:.2}");
+        }
+        other => {
+            return Err(anyhow!("unknown noetic subcommand: {other}"));
+        }
+    }
+    Ok(())
+}
+
+async fn send_remote_command(
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+    payload: JsonValue,
+) -> Result<()> {
+    let handle = {
+        let guard = remote.lock().await;
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        return Err(anyhow!("no nexus client connection"));
+    };
+    handle.send(payload).await
 }
 
 fn parse_impulse_json(data: &JsonValue) -> Result<Impulse> {
