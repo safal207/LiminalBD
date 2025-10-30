@@ -25,6 +25,7 @@ use crate::recursion::ReplayReport;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
 use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
+use crate::seeds::{tick_garden, SeedGarden};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
@@ -69,6 +70,7 @@ pub struct ClusterField {
     mirror_epochs: VecDeque<Epoch>,
     mirror_replays: VecDeque<ReplayReport>,
     pub resonant_model: ResonantModel,
+    pub seed_garden: SeedGarden,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +163,7 @@ impl ClusterField {
             mirror_epochs: VecDeque::new(),
             mirror_replays: VecDeque::new(),
             resonant_model: ResonantModel::default(),
+            seed_garden: SeedGarden::default(),
         }
     }
 
@@ -1829,7 +1832,25 @@ impl ClusterField {
             });
             events.push(event.to_string());
         }
+        let seed_events = self.tick_seed_garden();
+        events.extend(seed_events);
         self.awaken_tick();
+        events
+    }
+
+    pub fn seed_garden(&self) -> &SeedGarden {
+        &self.seed_garden
+    }
+
+    pub fn seed_garden_mut(&mut self) -> &mut SeedGarden {
+        &mut self.seed_garden
+    }
+
+    pub fn tick_seed_garden(&mut self) -> Vec<String> {
+        let now = self.now_ms;
+        let mut garden = std::mem::take(&mut self.seed_garden);
+        let events = tick_garden(self, &mut garden, now);
+        self.seed_garden = garden;
         events
     }
 
