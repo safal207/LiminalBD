@@ -1,17 +1,20 @@
 pub mod awakening;
 pub mod cluster_field;
 pub mod dream_engine;
+pub mod echo;
 pub mod journal;
 pub mod life_loop;
 pub mod lql;
 pub mod mirror;
 pub mod morph_mind;
+pub mod nlu;
 pub mod node_cell;
 pub mod recursion;
 pub mod reflex;
 pub mod resonant;
 pub mod security;
 pub mod seed;
+pub mod summaries;
 pub mod symmetry;
 pub mod synchrony;
 pub mod trs;
@@ -21,6 +24,7 @@ pub mod views;
 pub use awakening::{AwakeningConfig, AwakeningReport};
 pub use cluster_field::{ClusterField, FieldEvents};
 pub use dream_engine::{DreamConfig, DreamReport};
+pub use echo::{route_intent, EchoEvent, EchoState, Intent, IntentKind, IntentsRing};
 pub use journal::{
     AwakenApplyDelta, AwakenTickDelta, CellSnapshot, EventDelta, Journal, ModelBuildDelta,
 };
@@ -34,6 +38,7 @@ pub use mirror::{
     MirrorTimeline,
 };
 pub use morph_mind::{analyze, hints};
+pub use nlu::{parse_intent_text, NluError};
 pub use node_cell::NodeCell;
 pub use recursion::{replay_epoch, replay_epoch_by_id, ReplayConfig, ReplayReport};
 pub use reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule, ReflexWhen};
@@ -42,6 +47,7 @@ pub use resonant::{
 };
 pub use security::{hash_secret, Access, AccessError, ApiKey, NsId, Quotas, Role, TokenBucket};
 pub use seed::{create_seed, SeedParams};
+pub use summaries::{explain_token, make_status, Short, Status};
 pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop, SymmetryStatus};
 pub use synchrony::{detect_sync_groups, run_collective_dream, SyncConfig, SyncGroup, SyncReport};
 pub use trs::{TrsConfig, TrsOutput, TrsState};
