@@ -8,8 +8,8 @@ use liminal_core::life_loop::run_loop;
 use liminal_core::types::Hint;
 use liminal_core::ClusterField;
 use liminal_core::{
-    detect_sync_groups, parse_lql, run_collective_dream, AwakeningConfig, AwakeningReport,
-    Influence, ResonantModel, Tension,
+    detect_sync_groups, parse_lql, replay_epoch_by_id, run_collective_dream, AwakeningConfig,
+    AwakeningReport, Influence, ReplayConfig, ResonantModel, Tension,
 };
 use liminal_store::{decode_delta, DiskJournal, Offset};
 use serde_json::{json, Value as JsonValue};
@@ -533,6 +533,69 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
                 });
                 if let Ok(mut outbox) = state.outbox.lock() {
                     push_json_event(&mut outbox, event);
+                }
+            }
+            ProtocolCommand::MirrorTimeline { top } => {
+                let mut timeline = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move { field.lock().await.mirror_timeline() }
+                });
+                if let Some(limit) = top.map(|v| v as usize) {
+                    if limit == 0 {
+                        timeline.epochs.clear();
+                    } else if timeline.epochs.len() > limit {
+                        let remove = timeline.epochs.len() - limit;
+                        timeline.epochs.drain(0..remove);
+                    }
+                }
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "mirror.timeline",
+                        "meta": {
+                            "built_ms": timeline.built_ms,
+                            "epochs": timeline.epochs,
+                        }
+                    });
+                    push_json_event(&mut outbox, payload);
+                }
+            }
+            ProtocolCommand::MirrorInfluencers { k } => {
+                let limit = k.unwrap_or(10).min(u32::MAX) as usize;
+                let epochs = state.runtime.block_on({
+                    let field = state.field.clone();
+                    async move { field.lock().await.mirror_top_influencers(limit) }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "mirror.influencers",
+                        "meta": {"epochs": epochs},
+                    });
+                    push_json_event(&mut outbox, payload);
+                }
+            }
+            ProtocolCommand::MirrorReplay { epoch_id, cfg } => {
+                let cfg_value: ReplayConfig = cfg.unwrap_or_default();
+                let report = state.runtime.block_on({
+                    let field = state.field.clone();
+                    let cfg_clone = cfg_value.clone();
+                    async move {
+                        let mut guard = field.lock().await;
+                        replay_epoch_by_id(&mut *guard, epoch_id, &cfg_clone)
+                    }
+                });
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    let payload = json!({
+                        "ev": "replay",
+                        "meta": {
+                            "epoch_id": report.epoch_id,
+                            "mode": report.mode,
+                            "applied": report.applied,
+                            "predicted_gain": report.predicted_gain,
+                            "took_ms": report.took_ms,
+                            "cfg": cfg_value,
+                        }
+                    });
+                    push_json_event(&mut outbox, payload);
                 }
             }
             ProtocolCommand::Introspect(IntrospectRequest { target, top }) => {
