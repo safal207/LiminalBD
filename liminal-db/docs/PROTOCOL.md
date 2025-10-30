@@ -118,6 +118,47 @@ a <pattern> [strength]  # создать Affect-импульс
 :sync cfg               # показать конфигурацию коллективного сна
 :sync set <json>        # обновить параметры Synchrony Field
 :sync now               # запустить коллективный сон вручную
+
+## Echo Cortex
+
+Echo Cortex добавляет слой намерений и кратких ответов.
+
+### IntentKind
+
+Доступны следующие типы намерений:
+
+* `Boost`
+* `Deprioritize`
+* `Snapshot`
+* `DreamNow`
+* `SyncNow`
+* `AwakenNow`
+* `SetTarget`
+* `Query`
+* `Explain`
+* `Ask`
+
+### Формат команд
+
+Текстовая форма (`intent.text`):
+
+```
+{"cmd":"intent.text","lang":"ru|en","text":"boost cpu/load"}
+```
+
+Структурированная форма (`intent`):
+
+```
+{"cmd":"intent","kind":"Boost","target":"cpu/load","args":{"scale":0.2}}
+```
+
+Ошибки сигнализируются кодами `FORBIDDEN`, `BAD_INTENT`, `RATE_LIMIT`. На ключ действует квота 3 намерения в секунду с бёрстом 5.
+
+### Ответы
+
+* `{"ev":"echo","meta":{...}}` — квитанция о маршрутизации намерения.
+* `{"ev":"status",...}` — сжатый снимок состояния Echo.
+* `{"ev":"explain",...}` — краткое объяснение токена.
 :sync stats             # последние отчёты collective_dream
 ```
 
