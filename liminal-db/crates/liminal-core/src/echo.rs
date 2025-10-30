@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 
+use crate::seeds::{abort, plant, Seed, SeedKind};
 use crate::{ClusterField, NsId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -17,6 +18,9 @@ pub enum IntentKind {
     Query,
     Explain,
     Ask,
+    Plant,
+    Abort,
+    GardenStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +95,9 @@ impl Default for EchoState {
 pub fn route_intent(field: &mut ClusterField, intent: Intent) -> EchoEvent {
     use IntentKind::*;
 
+    let mut ok = true;
+    let mut extra = Map::new();
+
     let note = match intent.kind {
         Boost => format!("boosted {}", intent.target),
         Deprioritize => format!("deprioritized {}", intent.target),
@@ -132,14 +139,109 @@ pub fn route_intent(field: &mut ClusterField, intent: Intent) -> EchoEvent {
         Query => "status requested".to_string(),
         Explain => format!("explain {}", intent.target),
         Ask => "question noted".to_string(),
+        Plant => match handle_seed_plant(field, &intent) {
+            Ok((id, seed)) => {
+                extra.insert("seed_id".into(), Value::from(id));
+                extra.insert(
+                    "seed".into(),
+                    serde_json::to_value(&seed).unwrap_or(Value::Null),
+                );
+                format!("seed planted id={id}")
+            }
+            Err(err) => {
+                ok = false;
+                err
+            }
+        },
+        Abort => {
+            let id = intent
+                .args
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .or_else(|| intent.target.parse::<u64>().ok());
+            match id {
+                Some(seed_id) => {
+                    if let Some(seed) = abort(field.seed_garden_mut(), seed_id) {
+                        extra.insert(
+                            "seed".into(),
+                            serde_json::to_value(&seed).unwrap_or(Value::Null),
+                        );
+                        format!("seed {} aborted stage={}", seed_id, seed.stage.as_str())
+                    } else {
+                        ok = false;
+                        format!("seed {} not found", seed_id)
+                    }
+                }
+                None => {
+                    ok = false;
+                    "missing seed id".to_string()
+                }
+            }
+        }
+        GardenStatus => {
+            let garden = field.seed_garden();
+            extra.insert(
+                "garden".into(),
+                serde_json::to_value(garden).unwrap_or(Value::Null),
+            );
+            format!("garden has {} seeds", garden.seeds.len())
+        }
     };
+
+    let mut meta = Map::new();
+    meta.insert("ok".into(), Value::Bool(ok));
+    meta.insert("kind".into(), Value::String(format!("{:?}", intent.kind)));
+    meta.insert("note".into(), Value::String(note));
+    for (key, value) in extra {
+        meta.insert(key, value);
+    }
 
     EchoEvent {
         ev: "echo".to_string(),
-        meta: json!({
-            "ok": true,
-            "kind": format!("{:?}", intent.kind),
-            "note": note,
-        }),
+        meta: Value::Object(meta),
     }
+}
+
+fn handle_seed_plant(field: &mut ClusterField, intent: &Intent) -> Result<(u64, Seed), String> {
+    let now = field.now_ms;
+    let ns = intent.ns.clone();
+    let kind_str = intent
+        .args
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            if !intent.target.is_empty() {
+                Some(intent.target.as_str())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "missing seed kind".to_string())?;
+    let seed_kind: SeedKind = kind_str
+        .parse()
+        .map_err(|err: String| format!("invalid seed kind: {err}"))?;
+    let target = intent
+        .args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| intent.target.clone());
+    if target.is_empty() {
+        return Err("missing seed target".to_string());
+    }
+    let ttl_ms = intent
+        .args
+        .get("ttl_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60_000);
+    let ttl_ms = ttl_ms.min(u32::MAX as u64) as u32;
+    let args = intent
+        .args
+        .get("args")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_else(Map::new);
+    let seed = Seed::new(seed_kind, target, args, ttl_ms, ns, now);
+    let id = plant(field.seed_garden_mut(), seed.clone());
+    Ok((id, seed))
 }

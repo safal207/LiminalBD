@@ -14,6 +14,8 @@ pub mod reflex;
 pub mod resonant;
 pub mod security;
 pub mod seed;
+pub mod seeds;
+pub mod seeds_metrics;
 pub mod summaries;
 pub mod symmetry;
 pub mod synchrony;
@@ -47,6 +49,11 @@ pub use resonant::{
 };
 pub use security::{hash_secret, Access, AccessError, ApiKey, NsId, Quotas, Role, TokenBucket};
 pub use seed::{create_seed, SeedParams};
+pub use seeds::{
+    abort as abort_seed, plant as plant_seed, tick_garden as tick_seed_garden, Seed, SeedGarden,
+    SeedKind, SeedLog, SeedStage,
+};
+pub use seeds_metrics::{evaluate as evaluate_seed, score as score_seed, SeedTelemetry};
 pub use summaries::{explain_token, make_status, Short, Status};
 pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop, SymmetryStatus};
 pub use synchrony::{detect_sync_groups, run_collective_dream, SyncConfig, SyncGroup, SyncReport};
