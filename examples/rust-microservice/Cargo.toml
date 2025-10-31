@@ -1,0 +1,11 @@
+[package]
+name = "liminal-microservice"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+liminaldb-client = { path = "../../sdk/rust" }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = "0.3"
