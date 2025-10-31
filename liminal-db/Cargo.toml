@@ -6,5 +6,7 @@ members = [
     "crates/liminal-bridge-abi",
     "crates/liminal-bridge-net",
     "crates/liminal-store",
+    "crates/liminal-sal",
+    "crates/sal-adapters/sled",
 ]
 resolver = "2"
