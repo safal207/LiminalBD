@@ -6,5 +6,8 @@ members = [
     "liminal-db/crates/liminal-bridge-abi",
     "liminal-db/crates/liminal-bridge-net",
     "liminal-db/crates/liminal-store",
+    "protocol",
+    "sdk/rust",
+    "conformance",
 ]
 resolver = "2"

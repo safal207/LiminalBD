@@ -1,0 +1,16 @@
+{
+  "name": "@liminaldb/client",
+  "version": "1.0.0",
+  "description": "Official TypeScript client for the LiminalDB protocol v1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "generate": "node ../../protocol/codegen.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
