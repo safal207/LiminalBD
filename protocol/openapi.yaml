@@ -1,0 +1,55 @@
+openapi: 3.1.0
+info:
+  title: LiminalDB HTTP Bridge
+  version: 1.0.0
+  summary: Experimental HTTP bridge for the LiminalDB protocol v1.
+servers:
+  - url: https://api.liminaldb.dev
+paths:
+  /lql:
+    post:
+      summary: Execute an LQL query.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                parameters:
+                  type: object
+                  additionalProperties: true
+              required:
+                - query
+      responses:
+        '200':
+          description: LQL response payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+  /status:
+    get:
+      summary: Inspect bridge status and quotas.
+      responses:
+        '200':
+          description: Bridge status payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uptime:
+                    type: string
+                  quotas:
+                    type: object
+                    additionalProperties:
+                      type: number
