@@ -41,7 +41,8 @@ async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut args = std::env::args().skip(1);
     let mut pipe_cbor = false;
-    let mut store_path: Option<PathBuf> = None;
+    let mut store_uri: Option<String> = None;
+    let mut metrics_dir: Option<PathBuf> = None;
     let mut snap_interval_secs: u64 = 60;
     let mut snap_maxwal: u64 = 5_000;
     let mut ws_port: u16 = 8787;
@@ -55,7 +56,19 @@ async fn main() -> Result<()> {
                 let Some(path) = args.next() else {
                     return Err(anyhow!("--store requires a path"));
                 };
-                store_path = Some(PathBuf::from(path));
+                store_uri = Some(format!("sled://{}", path));
+            }
+            "--store-uri" => {
+                let Some(uri) = args.next() else {
+                    return Err(anyhow!("--store-uri requires a value"));
+                };
+                store_uri = Some(uri);
+            }
+            "--metrics-dir" => {
+                let Some(dir) = args.next() else {
+                    return Err(anyhow!("--metrics-dir requires a path"));
+                };
+                metrics_dir = Some(PathBuf::from(dir));
             }
             "--snap-interval" => {
                 let Some(value) = args.next() else {
@@ -118,10 +131,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store_config = store_path.map(|path| StoreRuntimeConfig {
-        path,
+    let store_backend = parse_store_backend(store_uri.as_deref().unwrap_or("sled://./data"))?;
+
+    let store_config = Some(StoreRuntimeConfig {
+        backend: store_backend,
         snap_interval: Duration::from_secs(snap_interval_secs),
         max_wal_events: snap_maxwal,
+        metrics_dir,
     });
 
     let ws_runtime = WsRuntimeConfig {
@@ -139,9 +155,47 @@ async fn main() -> Result<()> {
 
 #[derive(Clone)]
 struct StoreRuntimeConfig {
-    path: PathBuf,
+    backend: StoreBackend,
     snap_interval: Duration,
     max_wal_events: u64,
+    #[allow(dead_code)]
+    metrics_dir: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+enum StoreBackend {
+    Sled { path: PathBuf },
+}
+
+fn parse_store_backend(uri: &str) -> Result<StoreBackend> {
+    let (scheme, rest) = uri
+        .split_once("://")
+        .ok_or_else(|| anyhow!("invalid store uri: {uri}"))?;
+    match scheme {
+        "sled" => {
+            let path = if rest.is_empty() {
+                PathBuf::from("./data")
+            } else {
+                PathBuf::from(rest)
+            };
+            Ok(StoreBackend::Sled { path })
+        }
+        other => Err(anyhow!("unsupported store backend: {other}")),
+    }
+}
+
+impl StoreBackend {
+    fn open_journal(&self) -> Result<DiskJournal> {
+        match self {
+            StoreBackend::Sled { path } => DiskJournal::open(path),
+        }
+    }
+
+    fn as_path(&self) -> Option<&Path> {
+        match self {
+            StoreBackend::Sled { path } => Some(path.as_path()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -157,7 +211,7 @@ async fn run_interactive(
     mirror_interval_ms: u64,
 ) -> Result<()> {
     let (mut field, journal, store_cfg) = if let Some(cfg) = store.clone() {
-        let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
+        let journal = StdArc::new(cfg.backend.open_journal()?);
         let (mut field, replay_offset) =
             if let Some((seed, offset)) = journal.load_latest_snapshot()? {
                 (seed.into_field(), offset)
@@ -587,9 +641,11 @@ async fn run_interactive(
 async fn run_pipe_cbor(store: Option<StoreRuntimeConfig>) -> Result<()> {
     let config = BridgeConfig {
         tick_ms: 200,
-        store_path: store
-            .as_ref()
-            .map(|cfg| cfg.path.to_string_lossy().to_string()),
+        store_path: store.as_ref().and_then(|cfg| {
+            cfg.backend
+                .as_path()
+                .map(|p| p.to_string_lossy().to_string())
+        }),
         snap_interval: store
             .as_ref()
             .map(|cfg| cfg.snap_interval.as_secs().min(u64::from(u32::MAX)) as u32),
