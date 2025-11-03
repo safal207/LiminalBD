@@ -22,8 +22,8 @@ use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
     detect_sync_groups, parse_lql, replay_epoch_by_id, run_collective_dream, AwakeningConfig,
     AwakeningReport, ClusterField, DreamConfig, Epoch, HarmonySnapshot, Influence, LqlResponse,
-    MirrorTimeline, ReflexAction, ReflexRule, ReflexWhen, ReplayConfig, ReplayReport,
-    ResonantModel, SyncConfig, Tension, TrsConfig, ViewStats,
+    MirrorTimeline, ReflexCfg, ReplayConfig, ReplayReport, ResonantModel, SyncConfig, Tension,
+    TrsConfig, ViewStats,
 };
 #[cfg(test)]
 use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
@@ -767,84 +767,105 @@ async fn export_snapshot(field: &StdArc<Mutex<ClusterField>>, path: &Path) -> Re
 }
 
 async fn handle_reflex_command(command: &str, field: &StdArc<Mutex<ClusterField>>) {
-    let mut parts = command.splitn(2, ' ');
-    let sub = parts.next().unwrap_or("").trim();
-    let rest = parts.next().unwrap_or("").trim();
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("");
     match sub {
         "" | "help" => {
-            eprintln!("usage: :reflex <add|list|rm> ...");
+            eprintln!(
+                "usage: :reflex on|off|status|tune win=<ms> eps=<f32> step=<f32> hyster=<f32> cd=<ms> min_gain=<f32>"
+            );
         }
-        "add" => {
-            if rest.is_empty() {
-                eprintln!("usage: :reflex add <json>");
-                return;
-            }
-            match serde_json::from_str::<ReflexAddRequest>(rest) {
-                Ok(spec) => {
-                    let ReflexAddRequest {
-                        token,
-                        kind,
-                        min_strength,
-                        window_ms,
-                        min_count,
-                        then,
-                        enabled,
-                    } = spec;
-                    let rule = ReflexRule {
-                        id: 0,
-                        when: ReflexWhen {
-                            token,
-                            kind,
-                            min_strength,
-                            window_ms,
-                            min_count,
-                        },
-                        then,
-                        enabled,
-                    };
-                    let id = {
-                        let mut guard = field.lock().await;
-                        guard.add_reflex(rule)
-                    };
-                    println!("REFLEX_ADDED id={}", id);
-                }
-                Err(err) => eprintln!("invalid reflex spec: {err}"),
-            }
+        "on" => {
+            let mut guard = field.lock().await;
+            guard.set_reflex_enabled(true);
+            println!("REFLEX enabled win_ms={}", guard.reflex_cfg().win_ms);
         }
-        "list" => {
-            let rules = {
-                let guard = field.lock().await;
-                guard.list_reflex()
-            };
-            match serde_json::to_string_pretty(&rules) {
+        "off" => {
+            let mut guard = field.lock().await;
+            guard.set_reflex_enabled(false);
+            println!("REFLEX disabled");
+        }
+        "status" => {
+            let guard = field.lock().await;
+            let cfg = guard.reflex_cfg();
+            let report = guard.reflex_last_report();
+            match serde_json::to_string_pretty(&serde_json::json!({
+                "cfg": cfg,
+                "enabled": guard.reflex_enabled(),
+                "last_report": report,
+            })) {
                 Ok(json) => println!("{}", json),
-                Err(err) => eprintln!("failed to render rules: {err}"),
+                Err(err) => eprintln!("failed to render status: {err}"),
             }
         }
-        "rm" => {
-            if rest.is_empty() {
-                eprintln!("usage: :reflex rm <id>");
+        "tune" => {
+            let args: Vec<&str> = parts.collect();
+            let mut guard = field.lock().await;
+            if let Err(err) = apply_reflex_tuning(&args, guard.reflex_cfg_mut()) {
+                eprintln!("invalid reflex tuning: {err}");
+                eprintln!(
+                    "usage: :reflex tune win=<ms> eps=<f32> step=<f32> hyster=<f32> cd=<ms> min_gain=<f32>"
+                );
                 return;
             }
-            match rest.parse::<u64>() {
-                Ok(id) => {
-                    let removed = {
-                        let mut guard = field.lock().await;
-                        guard.remove_reflex(id)
-                    };
-                    if removed {
-                        println!("REFLEX_REMOVED id={}", id);
-                    } else {
-                        eprintln!("no reflex with id={} found", id);
-                    }
-                }
-                Err(err) => eprintln!("invalid reflex id: {err}"),
-            }
+            println!(
+                "REFLEX tuned win={}ms eps={:.3} step={:.2}",
+                guard.reflex_cfg().win_ms,
+                guard.reflex_cfg().eps,
+                guard.reflex_cfg().pivot_step
+            );
         }
         other => {
             eprintln!("Unknown reflex command: {}", other);
         }
     }
+}
+
+fn apply_reflex_tuning(args: &[&str], cfg: &mut ReflexCfg) -> Result<(), String> {
+    for arg in args {
+        let mut split = arg.splitn(2, '=');
+        let key = split.next().unwrap_or("").trim();
+        let value = split
+            .next()
+            .ok_or_else(|| format!("missing value for {key}"))?
+            .trim();
+        match key {
+            "win" | "win_ms" => {
+                cfg.win_ms = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid win_ms: {err}"))?;
+            }
+            "eps" => {
+                cfg.eps = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid eps: {err}"))?;
+            }
+            "step" | "pivot_step" => {
+                cfg.pivot_step = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid pivot_step: {err}"))?;
+            }
+            "hyster" | "hysteresis" => {
+                cfg.hysteresis = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid hysteresis: {err}"))?;
+            }
+            "cd" | "cooldown" | "cooldown_ms" => {
+                cfg.cooldown_ms = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid cooldown: {err}"))?;
+            }
+            "min_gain" => {
+                cfg.min_gain = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid min_gain: {err}"))?;
+            }
+            other => {
+                return Err(format!("unknown tuning key: {other}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
@@ -1322,21 +1343,6 @@ async fn handle_dream_command(command: &str, field: &StdArc<Mutex<ClusterField>>
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct ReflexAddRequest {
-    token: String,
-    kind: ImpulseKind,
-    min_strength: f32,
-    window_ms: u32,
-    min_count: u16,
-    then: ReflexAction,
-    #[serde(default = "default_enabled")]
-    enabled: bool,
-}
-fn default_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize, Default)]
