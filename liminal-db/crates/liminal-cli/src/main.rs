@@ -436,6 +436,18 @@ async fn run_interactive(
                             }
                         }
                     }
+                    command
+                        if command.starts_with("variants")
+                            || command.starts_with("intend")
+                            || command.starts_with("slide")
+                            || command.starts_with("commit")
+                            || command.starts_with("pivot")
+                            || command.starts_with("defuse") =>
+                    {
+                        if let Err(err) = run_lql_query(&field_for_cli, command).await {
+                            eprintln!("LQL command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("reflex") => {
                         handle_reflex_command(
                             command.trim_start_matches("reflex").trim(),
@@ -597,25 +609,8 @@ async fn run_interactive(
                     if query.is_empty() {
                         eprintln!("usage: lql <SELECT|SUBSCRIBE|UNSUBSCRIBE ...>");
                     } else {
-                        match parse_lql(query) {
-                            Ok(ast) => {
-                                let outcome = {
-                                    let mut guard = field_for_cli.lock().await;
-                                    guard.exec_lql(ast)
-                                };
-                                match outcome {
-                                    Ok(result) => {
-                                        if let Some(response) = result.response {
-                                            print_lql_response(&response);
-                                        }
-                                        for event in result.events {
-                                            print_event_line(&event);
-                                        }
-                                    }
-                                    Err(err) => eprintln!("LQL execution failed: {}", err),
-                                }
-                            }
-                            Err(err) => eprintln!("LQL parse error: {}", err),
+                        if let Err(err) = run_lql_query(&field_for_cli, query).await {
+                            eprintln!("LQL execution failed: {}", err);
                         }
                     }
                     continue;
@@ -925,6 +920,22 @@ async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) 
         }
         other => Err(anyhow!("unknown trs subcommand: {}", other)),
     }
+}
+
+async fn run_lql_query(field: &StdArc<Mutex<ClusterField>>, query: &str) -> Result<(), String> {
+    let ast = parse_lql(query).map_err(|err| err.to_string())?;
+    let outcome = {
+        let mut guard = field.lock().await;
+        guard.exec_lql(ast)
+    }
+    .map_err(|err| err.to_string())?;
+    if let Some(response) = outcome.response {
+        print_lql_response(&response);
+    }
+    for event in outcome.events {
+        print_event_line(&event);
+    }
+    Ok(())
 }
 
 async fn handle_mirror_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
@@ -1857,6 +1868,10 @@ fn print_event_line(raw: &str) {
                 "view" => format_view_event(&value),
                 "lql" => format_lql_event(&value),
                 "harmony" => format_harmony_event(&value),
+                "manifold" => format_manifold_event(&value),
+                "commit" => format_commit_event(&value),
+                "pivot" => format_pivot_event(&value),
+                "defuse" => format_defuse_event(&value),
                 _ => None,
             } {
                 println!("{}", line);
@@ -1970,6 +1985,122 @@ fn format_harmony_event(value: &JsonValue) -> Option<String> {
     ))
 }
 
+fn format_manifold_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    if let Some(intention) = meta.get("intention") {
+        let tokens = intention
+            .get("tokens")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let weights = intention
+            .get("weights")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let horizon = intention
+            .get("horizon_ms")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        let budget = intention
+            .get("budget")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "-".into());
+        return Some(format!(
+            "MANIFOLD INTEND tokens=[{}] weights=[{}] horizon_ms={} budget={}",
+            tokens, weights, horizon, budget
+        ));
+    }
+    if let Some(variants) = meta.get("variants") {
+        let limit = meta
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        let min_p = meta
+            .get("min_probability")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "-".into());
+        let top = variants
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                Some(format!(
+                    "{}(p={:.2},score={:.3})",
+                    item.get("id")?.as_str().unwrap_or(""),
+                    item.get("probability")?.as_f64()?,
+                    item.get("score")?.as_f64()?
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!(
+            "MANIFOLD VARIANTS limit={} min_p={} top=[{}]",
+            limit, min_p, top
+        ));
+    }
+    if let Some(slide) = meta.get("slide") {
+        let id = slide.get("id")?.as_str().unwrap_or("?");
+        let variants = slide
+            .get("variant_ids")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Some(format!("MANIFOLD SLIDE id={} variants=[{}]", id, variants));
+    }
+    None
+}
+
+fn format_commit_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let variant = meta.get("variant")?.as_str().unwrap_or("?");
+    let seeds = meta
+        .get("seeds")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_u64())
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "COMMIT variant={} seeds=[{}]",
+        variant,
+        if seeds.is_empty() { "-".into() } else { seeds }
+    ))
+}
+
+fn format_pivot_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let from = meta.get("from")?.as_str().unwrap_or("?");
+    let to = meta.get("to")?.as_str().unwrap_or("?");
+    let inertia = meta.get("inertia")?.as_f64().unwrap_or(0.0);
+    let reason = meta.get("reason").and_then(|v| v.as_str()).unwrap_or("-");
+    Some(format!(
+        "PIVOT from={} to={} inertia={:.3} reason={}",
+        from, to, inertia, reason
+    ))
+}
+
+fn format_defuse_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let pendulum = meta.get("pendulum")?.as_str().unwrap_or("?");
+    let drain = meta.get("drain_rate")?.as_f64().unwrap_or(0.0);
+    Some(format!(
+        "DEFUSE pendulum={} drain_rate={:.3}",
+        pendulum, drain
+    ))
+}
+
 fn extract_stats_from_json(stats: &JsonValue) -> Option<(u32, f64, f64, String)> {
     let count = stats.get("count")?.as_u64()? as u32;
     let avg_strength = stats.get("avg_strength")?.as_f64()?;
@@ -2057,6 +2188,86 @@ fn print_lql_response(response: &LqlResponse) {
             println!(
                 "LQL UNSUBSCRIBE id={} removed={}",
                 result.id, result.removed
+            );
+        }
+        LqlResponse::Intend(result) => {
+            let tokens = result.tokens.join(",");
+            let weights = result
+                .weights
+                .iter()
+                .map(|w| format!("{w:.2}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let horizon = result
+                .horizon_ms
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            let budget = result
+                .budget
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "LQL INTEND tokens=[{}] weights=[{}] horizon_ms={} budget={}",
+                tokens, weights, horizon, budget
+            );
+        }
+        LqlResponse::Variants(result) => {
+            let summary = result
+                .variants
+                .iter()
+                .map(|v| format!("{}(p={:.2},score={:.3})", v.id, v.probability, v.score))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let limit = result
+                .limit
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            let min_p = result
+                .min_probability
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "LQL VARIANTS limit={} min_p={} top=[{}]",
+                limit, min_p, summary
+            );
+        }
+        LqlResponse::Slide(result) => {
+            let variants = result.variant_ids.join(",");
+            let goals = result
+                .desired_metrics
+                .iter()
+                .map(|(k, v)| format!("{}:{:.2}", k, v))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "LQL SLIDE id={} variants=[{}] goals={{ {} }}",
+                result.id, variants, goals
+            );
+        }
+        LqlResponse::Commit(result) => {
+            let seeds = if result.seeds.is_empty() {
+                "-".into()
+            } else {
+                result
+                    .seeds
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!("LQL COMMIT variant={} seeds=[{}]", result.variant_id, seeds);
+        }
+        LqlResponse::Pivot(result) => {
+            let reason = result.reason.clone().unwrap_or_else(|| "-".into());
+            println!(
+                "LQL PIVOT from={} to={} inertia={:.3} reason={}",
+                result.from, result.to, result.inertia, reason
+            );
+        }
+        LqlResponse::Defuse(result) => {
+            println!(
+                "LQL DEFUSE pendulum={} drain {} -> {}",
+                result.pendulum_id, result.previous_drain, result.new_drain
             );
         }
     }

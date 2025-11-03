@@ -13,7 +13,9 @@ async fn main() -> anyhow::Result<()> {
     let sub_id = client.subscribe("harmony/*", None).await;
     println!("Subscribed with id {}", sub_id);
 
-    let mut events = client.events();
+    let events = client.events();
+    tokio::pin!(events);
+
     while let Some(event) = events.next().await {
         println!("event: {:?}", event);
     }

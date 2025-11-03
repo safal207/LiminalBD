@@ -15,9 +15,9 @@ struct Args {
 
 #[derive(Debug, Clone)]
 struct Scenario {
-    name: &'static str;
-    description: &'static str;
-    status: ScenarioStatus;
+    name: &'static str,
+    description: &'static str,
+    status: ScenarioStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +37,7 @@ impl Scenario {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     fs::create_dir_all(&args.output_dir)?;

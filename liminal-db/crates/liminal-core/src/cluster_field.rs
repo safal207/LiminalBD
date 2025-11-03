@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blake3::Hasher;
 use rand::Rng;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 
 use crate::awakening::{awaken, AwakeningConfig, AwakeningReport};
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
@@ -16,8 +16,9 @@ use crate::journal::{
     SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
-    LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
-    LqlUnsubscribeResult,
+    LqlAst, LqlCommitResult, LqlDefuseResult, LqlError, LqlExecResult, LqlIntendResult,
+    LqlPivotResult, LqlResponse, LqlResult, LqlSelectResult, LqlSlideResult, LqlSubscribeResult,
+    LqlUnsubscribeResult, LqlVariantInfo, LqlVariantsResult,
 };
 use crate::mirror::{Epoch, EpochKind, MirrorTimeline};
 use crate::node_cell::NodeCell;
@@ -25,11 +26,12 @@ use crate::recursion::ReplayReport;
 use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
 use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
-use crate::seeds::{tick_garden, SeedGarden};
+use crate::seeds::{plant as plant_seed, tick_garden, Seed, SeedGarden, SeedKind};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
+use crate::variant::{Intention, Slide, VariantManifold};
 use crate::views::{NodeHitStat, ViewFilter, ViewRegistry, ViewStats};
 
 pub type FieldEvents = Vec<String>;
@@ -71,6 +73,7 @@ pub struct ClusterField {
     mirror_replays: VecDeque<ReplayReport>,
     pub resonant_model: ResonantModel,
     pub seed_garden: SeedGarden,
+    pub variant_layer: VariantManifold,
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +167,50 @@ impl ClusterField {
             mirror_replays: VecDeque::new(),
             resonant_model: ResonantModel::default(),
             seed_garden: SeedGarden::default(),
+            variant_layer: VariantManifold::default(),
         }
+    }
+
+    pub fn variant_layer(&self) -> &VariantManifold {
+        &self.variant_layer
+    }
+
+    pub fn variant_layer_mut(&mut self) -> &mut VariantManifold {
+        &mut self.variant_layer
+    }
+
+    fn plant_variant_seeds(&mut self, variant_id: &str) -> Vec<u64> {
+        let Some(variant) = self.variant_layer.get_variant(variant_id).cloned() else {
+            return Vec::new();
+        };
+        let now = self.now_ms;
+        let ttl_ms = variant.time_est_ms.max(1);
+        let tokens = if variant.path_hint.is_empty() {
+            vec![variant.title.clone()]
+        } else {
+            variant.path_hint.clone()
+        };
+        let mut planted = Vec::new();
+        for token in tokens.iter().take(3) {
+            let mut args = JsonMap::new();
+            args.insert("source".into(), JsonValue::String(variant_id.to_string()));
+            args.insert("token".into(), JsonValue::String(token.clone()));
+            args.insert(
+                "expected_gain".into(),
+                JsonValue::from(variant.expected_gain as f64),
+            );
+            let seed = Seed::new(
+                SeedKind::PolicyBundle,
+                token.clone(),
+                args,
+                ttl_ms,
+                "manifold".into(),
+                now,
+            );
+            let id = plant_seed(self.seed_garden_mut(), seed);
+            planted.push(id);
+        }
+        planted
     }
 
     pub fn with_journal(mut self, journal: Arc<dyn Journal + Send + Sync>) -> Self {
@@ -738,6 +784,173 @@ impl ClusterField {
                 .to_string();
                 Ok(LqlExecResult {
                     response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::Intend {
+                tokens,
+                weights,
+                horizon_ms,
+                budget,
+            } => {
+                let intention = Intention {
+                    focus_tokens: tokens.clone(),
+                    weights: weights.clone(),
+                    horizon_ms,
+                    budget,
+                };
+                self.variant_layer.set_intention(intention.clone());
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "intention": {
+                            "tokens": tokens,
+                            "weights": weights,
+                            "horizon_ms": horizon_ms,
+                            "budget": budget,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Intend(LqlIntendResult {
+                        tokens: intention.focus_tokens,
+                        weights: intention.weights,
+                        horizon_ms: intention.horizon_ms,
+                        budget: intention.budget,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Variants {
+                limit,
+                min_probability,
+            } => {
+                let ranked = self
+                    .variant_layer
+                    .rank_variants(limit, min_probability)
+                    .into_iter()
+                    .map(|score| LqlVariantInfo {
+                        id: score.id,
+                        title: score.title,
+                        probability: score.probability,
+                        effort: score.effort,
+                        score: score.score,
+                        evidence: score.evidence,
+                        risk: score.risk,
+                        expected_gain: score.expected_gain,
+                    })
+                    .collect::<Vec<_>>();
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "variants": ranked,
+                        "limit": limit,
+                        "min_probability": min_probability,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Variants(LqlVariantsResult {
+                        limit,
+                        min_probability,
+                        variants: ranked,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::SlideSet {
+                id,
+                variants,
+                goals,
+                ethics_guard,
+            } => {
+                let slide = Slide {
+                    id: id.clone(),
+                    variant_ids: variants.clone(),
+                    desired_metrics: goals.clone(),
+                    ethics_guard,
+                };
+                self.variant_layer.set_slide(slide.clone());
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "slide": slide,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Slide(LqlSlideResult {
+                        id,
+                        variant_ids: variants,
+                        desired_metrics: goals,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Commit { variant_id } => {
+                let Some(outcome) = self.variant_layer.commit(&variant_id, self.now_ms) else {
+                    return Err(LqlError::new(format!("unknown variant {variant_id}")));
+                };
+                let seeds = self.plant_variant_seeds(&variant_id);
+                let event = json!({
+                    "ev": "commit",
+                    "meta": {
+                        "variant": outcome.variant_id,
+                        "seeds": seeds.clone(),
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Commit(LqlCommitResult {
+                        variant_id: outcome.variant_id,
+                        seeds,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Pivot { from, to, reason } => {
+                let Some(outcome) = self.variant_layer.pivot(&from, &to, self.now_ms) else {
+                    return Err(LqlError::new("unable to pivot: variant mismatch"));
+                };
+                let event = json!({
+                    "ev": "pivot",
+                    "meta": {
+                        "from": outcome.from,
+                        "to": outcome.to,
+                        "reason": reason,
+                        "inertia": outcome.inertia,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Pivot(LqlPivotResult {
+                        from: outcome.from,
+                        to: outcome.to,
+                        inertia: outcome.inertia,
+                        reason,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Defuse { pendulum_id, drain } => {
+                let Some(outcome) = self.variant_layer.defuse(&pendulum_id, drain) else {
+                    return Err(LqlError::new("unknown pendulum"));
+                };
+                let event = json!({
+                    "ev": "defuse",
+                    "meta": {
+                        "pendulum": outcome.pendulum_id,
+                        "drain_rate": outcome.new_drain,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Defuse(LqlDefuseResult {
+                        pendulum_id: outcome.pendulum_id,
+                        previous_drain: outcome.previous_drain,
+                        new_drain: outcome.new_drain,
+                    })),
                     events: vec![event],
                 })
             }
