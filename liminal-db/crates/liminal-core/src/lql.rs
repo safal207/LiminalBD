@@ -66,6 +66,12 @@ pub enum LqlAst {
         pendulum_id: String,
         drain: f32,
     },
+    ReflexOn,
+    ReflexOff,
+    ReflexStatus,
+    ReflexTune {
+        cfg: ReflexCfg,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,6 +244,7 @@ pub fn parse_lql(input: &str) -> Result<LqlAst, LqlError> {
             let tokens: Vec<&str> = parts.collect();
             parse_defuse(&tokens)
         }
+        "REFLEX" => parse_reflex(&mut parts),
         other => Err(LqlError::new(format!("unknown LQL command: {}", other))),
     }
 }
