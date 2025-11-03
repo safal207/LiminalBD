@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::reflex::ReflexCfg;
 use crate::seeds::{abort, plant, Seed, SeedKind};
 use crate::{ClusterField, NsId};
 
@@ -21,6 +22,10 @@ pub enum IntentKind {
     Plant,
     Abort,
     GardenStatus,
+    ReflexOn,
+    ReflexOff,
+    ReflexTune { cfg: ReflexCfg },
+    ReflexStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +190,42 @@ pub fn route_intent(field: &mut ClusterField, intent: Intent) -> EchoEvent {
                 serde_json::to_value(garden).unwrap_or(Value::Null),
             );
             format!("garden has {} seeds", garden.seeds.len())
+        }
+        ReflexOn => {
+            field.set_reflex_enabled(true);
+            format!("reflex enabled (win={}ms)", field.reflex_cfg().win_ms)
+        }
+        ReflexOff => {
+            field.set_reflex_enabled(false);
+            "reflex disabled".to_string()
+        }
+        ReflexStatus => {
+            extra.insert(
+                "cfg".into(),
+                serde_json::to_value(field.reflex_cfg()).unwrap_or(Value::Null),
+            );
+            if let Some(report) = field.reflex_last_report() {
+                extra.insert(
+                    "last_report".into(),
+                    serde_json::to_value(report).unwrap_or(Value::Null),
+                );
+                format!("reflex last signal {:?}", report.sig)
+            } else {
+                "reflex idle".to_string()
+            }
+        }
+        ReflexTune { ref cfg } => {
+            *field.reflex_cfg_mut() = cfg.clone();
+            extra.insert(
+                "cfg".into(),
+                serde_json::to_value(field.reflex_cfg()).unwrap_or(Value::Null),
+            );
+            format!(
+                "reflex tuned win={}ms eps={:.3} step={:.2}",
+                field.reflex_cfg().win_ms,
+                field.reflex_cfg().eps,
+                field.reflex_cfg().pivot_step
+            )
         }
     };
 

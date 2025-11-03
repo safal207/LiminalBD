@@ -43,7 +43,9 @@ pub use morph_mind::{analyze, hints};
 pub use nlu::{parse_intent_text, NluError};
 pub use node_cell::NodeCell;
 pub use recursion::{replay_epoch, replay_epoch_by_id, ReplayConfig, ReplayReport};
-pub use reflex::{ReflexAction, ReflexFire, ReflexId, ReflexRule, ReflexWhen};
+pub use reflex::{
+    ReflexAction, ReflexCfg, ReflexFire, ReflexId, ReflexReport, ReflexRule, ReflexWhen,
+};
 pub use resonant::{
     build_model, Influence, ResonantEdge, ResonantModel, SyncEvent, SyncLog, Tension,
 };
