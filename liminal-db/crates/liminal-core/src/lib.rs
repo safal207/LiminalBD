@@ -21,6 +21,7 @@ pub mod symmetry;
 pub mod synchrony;
 pub mod trs;
 pub mod types;
+pub mod variant;
 pub mod views;
 
 pub use awakening::{AwakeningConfig, AwakeningReport};
@@ -59,4 +60,8 @@ pub use symmetry::{HarmonyMetrics, HarmonySnapshot, MirrorImpulse, SymmetryLoop,
 pub use synchrony::{detect_sync_groups, run_collective_dream, SyncConfig, SyncGroup, SyncReport};
 pub use trs::{TrsConfig, TrsOutput, TrsState};
 pub use types::{Hint, Impulse, ImpulseKind, Metrics, NodeId, NodeState};
+pub use variant::{
+    CommitOutcome, DefuseOutcome, Intention, PivotOutcome, ProbabilityFlow, ProbabilityWeights,
+    Slide, Variant, VariantId, VariantManifold, VariantScore,
+};
 pub use views::{NodeHitStat, ViewFilter, ViewId, ViewRegistry, ViewStats};
