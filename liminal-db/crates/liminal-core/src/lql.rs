@@ -3,6 +3,8 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::reflex::ReflexCfg;
+
 use crate::views::{ViewFilter, ViewStats};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +65,12 @@ pub enum LqlAst {
     Defuse {
         pendulum_id: String,
         drain: f32,
+    },
+    ReflexOn,
+    ReflexOff,
+    ReflexStatus,
+    ReflexTune {
+        cfg: ReflexCfg,
     },
 }
 
@@ -236,7 +244,35 @@ pub fn parse_lql(input: &str) -> Result<LqlAst, LqlError> {
             let tokens: Vec<&str> = parts.collect();
             parse_defuse(&tokens)
         }
+        "REFLEX" => parse_reflex(&mut parts),
         other => Err(LqlError::new(format!("unknown LQL command: {}", other))),
+    }
+}
+
+fn parse_reflex<'a, I>(parts: &mut I) -> Result<LqlAst, LqlError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let action = parts
+        .next()
+        .ok_or_else(|| LqlError::new("REFLEX requires a subcommand"))?
+        .to_uppercase();
+    match action.as_str() {
+        "ON" => Ok(LqlAst::ReflexOn),
+        "OFF" => Ok(LqlAst::ReflexOff),
+        "STATUS" => Ok(LqlAst::ReflexStatus),
+        "TUNE" => {
+            let raw: Vec<&str> = parts.collect();
+            if raw.is_empty() {
+                return Err(LqlError::new("REFLEX TUNE requires a config"));
+            }
+            let joined = raw.join(" ");
+            let cfg: ReflexCfg = serde_json::from_str(&joined).map_err(|err| {
+                LqlError::new(format!("invalid REFLEX config: {err}"))
+            })?;
+            Ok(LqlAst::ReflexTune { cfg })
+        }
+        other => Err(LqlError::new(format!("unknown REFLEX subcommand: {}", other))),
     }
 }
 

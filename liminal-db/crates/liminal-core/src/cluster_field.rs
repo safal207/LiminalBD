@@ -23,7 +23,10 @@ use crate::lql::{
 use crate::mirror::{Epoch, EpochKind, MirrorTimeline};
 use crate::node_cell::NodeCell;
 use crate::recursion::ReplayReport;
-use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
+use crate::reflex::{
+    apply_action, cooldown_for, ReflexAction, ReflexCfg, ReflexContext, ReflexEngine, ReflexFire,
+    ReflexId, ReflexReport, ReflexRule, ReflexSnapshot, ReflexState,
+};
 use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
 use crate::seeds::{plant as plant_seed, tick_garden, Seed, SeedGarden, SeedKind};
@@ -67,6 +70,8 @@ pub struct ClusterField {
     next_hit_seq: u64,
     view_tick_accum: u64,
     reflex_engine: ReflexEngine,
+    reflex_feedback: ReflexState,
+    reflex_reports: VecDeque<ReflexReport>,
     important_cells: HashSet<NodeId>,
     noradrenaline: Option<NoradrenalineEffect>,
     mirror_epochs: VecDeque<Epoch>,
@@ -161,6 +166,8 @@ impl ClusterField {
             next_hit_seq: 1,
             view_tick_accum: 0,
             reflex_engine: ReflexEngine::new(2_000),
+            reflex_feedback: ReflexState::new(ReflexCfg::default()),
+            reflex_reports: VecDeque::with_capacity(128),
             important_cells: HashSet::new(),
             noradrenaline: None,
             mirror_epochs: VecDeque::new(),
@@ -500,6 +507,15 @@ impl ClusterField {
                 None
             }
         })
+    }
+
+    fn reflex_neighbors(&self) -> Vec<(String, f32)> {
+        // Placeholder heuristic: prioritize recently shared tokens if available.
+        // The detailed resonance computation will be introduced in later revisions.
+        self.route_bias
+            .iter()
+            .map(|((token, _), bias)| (token.clone(), *bias))
+            .collect()
     }
 
     fn affinity_scale_for(&self, cell: &NodeCell) -> f32 {
@@ -966,6 +982,59 @@ impl ClusterField {
                 .to_string();
                 Ok(LqlExecResult {
                     response: Some(LqlResponse::Unsubscribe(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexOn => {
+                self.set_reflex_enabled(true);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": true, "cfg": self.reflex_cfg()}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexOff => {
+                self.set_reflex_enabled(false);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": false}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexStatus => {
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "reflex_status": {
+                            "enabled": self.reflex_enabled(),
+                            "cfg": self.reflex_cfg(),
+                            "last_report": self.reflex_last_report(),
+                        }
+                    },
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexTune { cfg } => {
+                *self.reflex_cfg_mut() = cfg;
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": self.reflex_enabled(), "cfg": self.reflex_cfg()}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
                     events: vec![event],
                 })
             }
@@ -2171,6 +2240,70 @@ impl ClusterField {
 
     pub fn symmetry_snapshot(&self) -> HarmonySnapshot {
         self.reflex_engine.snapshot()
+    }
+
+    pub fn reflex_cfg(&self) -> &ReflexCfg {
+        self.reflex_feedback.cfg()
+    }
+
+    pub fn reflex_cfg_mut(&mut self) -> &mut ReflexCfg {
+        self.reflex_feedback.cfg_mut()
+    }
+
+    pub fn set_reflex_enabled(&mut self, enabled: bool) {
+        self.reflex_feedback.set_enabled(enabled);
+    }
+
+    pub fn reflex_enabled(&self) -> bool {
+        self.reflex_feedback.enabled()
+    }
+
+    pub fn record_reflex_snapshot(&mut self, snapshot: ReflexSnapshot) -> Option<ReflexReport> {
+        self.reflex_feedback.push_snapshot(snapshot);
+        let cfg_snapshot = self.reflex_feedback.cfg().clone();
+        let ctx = ReflexContext {
+            cfg: &cfg_snapshot,
+            slo_latency_ms: 320.0,
+            neighbors: self.reflex_neighbors(),
+            now_ms: self.now_ms,
+        };
+        let report = self.reflex_feedback.next_report(ctx);
+        if let Some(report) = &report {
+            if let Some(action) = &report.action {
+                apply_action(self, self.now_ms, action);
+                let cooldown = cooldown_for(action, self.reflex_feedback.cfg());
+                self.reflex_feedback
+                    .record_action(action.kind(), self.now_ms, cooldown);
+            }
+            self.reflex_reports.push_back(report.clone());
+            while self.reflex_reports.len() > 128 {
+                self.reflex_reports.pop_front();
+            }
+        }
+        report
+    }
+
+    pub fn reflex_reports(&self) -> impl Iterator<Item = &ReflexReport> {
+        self.reflex_reports.iter()
+    }
+
+    pub fn reflex_last_report(&self) -> Option<&ReflexReport> {
+        self.reflex_reports.back()
+    }
+
+    pub fn drain_route_bias(&mut self, factor: f32) {
+        let decay = (1.0 - factor).clamp(0.0, 1.0);
+        for value in self.route_bias.values_mut() {
+            *value *= decay;
+        }
+    }
+
+    pub fn apply_dampening(&mut self, now_ms: u64, strength: f32, ttl_ms: u64) {
+        let effect = NoradrenalineEffect {
+            until_ms: now_ms.saturating_add(ttl_ms),
+            strength: strength.clamp(0.0, 1.0),
+        };
+        self.noradrenaline = Some(effect);
     }
 
     pub fn mirror_epochs_iter(&self) -> impl Iterator<Item = &Epoch> {

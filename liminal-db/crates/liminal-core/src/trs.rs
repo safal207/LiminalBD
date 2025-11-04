@@ -67,6 +67,10 @@ impl TrsState {
         self.target_load = target.clamp(0.0, 1.0);
     }
 
+    pub fn target(&self) -> f32 {
+        self.target_load
+    }
+
     pub fn step(&mut self, now_ms: u64, observed_load: f32) -> TrsOutput {
         let observed = observed_load.clamp(0.0, 1.0);
         let target = self.target_load.clamp(0.0, 1.0);
