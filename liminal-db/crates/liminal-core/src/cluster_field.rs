@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blake3::Hasher;
 use rand::Rng;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 
 use crate::awakening::{awaken, AwakeningConfig, AwakeningReport};
 use crate::dream_engine::{run_dream, DreamConfig, DreamReport, PairStat};
@@ -16,19 +16,25 @@ use crate::journal::{
     SyncAlignDelta, SyncShareDelta, TickDelta, TrsHarmonyDelta, TrsTargetDelta, TrsTraceDelta,
 };
 use crate::lql::{
-    LqlAst, LqlExecResult, LqlResponse, LqlResult, LqlSelectResult, LqlSubscribeResult,
-    LqlUnsubscribeResult,
+    LqlAst, LqlCommitResult, LqlDefuseResult, LqlError, LqlExecResult, LqlIntendResult,
+    LqlPivotResult, LqlResponse, LqlResult, LqlSelectResult, LqlSlideResult, LqlSubscribeResult,
+    LqlUnsubscribeResult, LqlVariantInfo, LqlVariantsResult,
 };
 use crate::mirror::{Epoch, EpochKind, MirrorTimeline};
 use crate::node_cell::NodeCell;
 use crate::recursion::ReplayReport;
-use crate::reflex::{ReflexAction, ReflexEngine, ReflexFire, ReflexId, ReflexRule};
+use crate::reflex::{
+    apply_action, cooldown_for, ReflexAction, ReflexCfg, ReflexContext, ReflexEngine, ReflexFire,
+    ReflexId, ReflexReport, ReflexRule, ReflexSnapshot, ReflexState,
+};
 use crate::resonant::{build_model, ModelFrame, ResonantModel, SyncLog};
 use crate::seed::{create_seed, SeedParams};
+use crate::seeds::{plant as plant_seed, tick_garden, Seed, SeedGarden, SeedKind};
 use crate::symmetry::HarmonySnapshot;
 use crate::synchrony::{SyncConfig, SyncReport};
 use crate::trs::{TrsConfig, TrsOutput, TrsState};
 use crate::types::{Impulse, ImpulseKind, NodeId, NodeState};
+use crate::variant::{Intention, Slide, VariantManifold};
 use crate::views::{NodeHitStat, ViewFilter, ViewRegistry, ViewStats};
 
 pub type FieldEvents = Vec<String>;
@@ -64,11 +70,15 @@ pub struct ClusterField {
     next_hit_seq: u64,
     view_tick_accum: u64,
     reflex_engine: ReflexEngine,
+    reflex_feedback: ReflexState,
+    reflex_reports: VecDeque<ReflexReport>,
     important_cells: HashSet<NodeId>,
     noradrenaline: Option<NoradrenalineEffect>,
     mirror_epochs: VecDeque<Epoch>,
     mirror_replays: VecDeque<ReplayReport>,
     pub resonant_model: ResonantModel,
+    pub seed_garden: SeedGarden,
+    pub variant_layer: VariantManifold,
 }
 
 #[derive(Debug, Clone)]
@@ -156,12 +166,58 @@ impl ClusterField {
             next_hit_seq: 1,
             view_tick_accum: 0,
             reflex_engine: ReflexEngine::new(2_000),
+            reflex_feedback: ReflexState::new(ReflexCfg::default()),
+            reflex_reports: VecDeque::with_capacity(128),
             important_cells: HashSet::new(),
             noradrenaline: None,
             mirror_epochs: VecDeque::new(),
             mirror_replays: VecDeque::new(),
             resonant_model: ResonantModel::default(),
+            seed_garden: SeedGarden::default(),
+            variant_layer: VariantManifold::default(),
         }
+    }
+
+    pub fn variant_layer(&self) -> &VariantManifold {
+        &self.variant_layer
+    }
+
+    pub fn variant_layer_mut(&mut self) -> &mut VariantManifold {
+        &mut self.variant_layer
+    }
+
+    fn plant_variant_seeds(&mut self, variant_id: &str) -> Vec<u64> {
+        let Some(variant) = self.variant_layer.get_variant(variant_id).cloned() else {
+            return Vec::new();
+        };
+        let now = self.now_ms;
+        let ttl_ms = variant.time_est_ms.max(1);
+        let tokens = if variant.path_hint.is_empty() {
+            vec![variant.title.clone()]
+        } else {
+            variant.path_hint.clone()
+        };
+        let mut planted = Vec::new();
+        for token in tokens.iter().take(3) {
+            let mut args = JsonMap::new();
+            args.insert("source".into(), JsonValue::String(variant_id.to_string()));
+            args.insert("token".into(), JsonValue::String(token.clone()));
+            args.insert(
+                "expected_gain".into(),
+                JsonValue::from(variant.expected_gain as f64),
+            );
+            let seed = Seed::new(
+                SeedKind::PolicyBundle,
+                token.clone(),
+                args,
+                ttl_ms,
+                "manifold".into(),
+                now,
+            );
+            let id = plant_seed(self.seed_garden_mut(), seed);
+            planted.push(id);
+        }
+        planted
     }
 
     pub fn with_journal(mut self, journal: Arc<dyn Journal + Send + Sync>) -> Self {
@@ -453,6 +509,15 @@ impl ClusterField {
         })
     }
 
+    fn reflex_neighbors(&self) -> Vec<(String, f32)> {
+        // Placeholder heuristic: prioritize recently shared tokens if available.
+        // The detailed resonance computation will be introduced in later revisions.
+        self.route_bias
+            .iter()
+            .map(|((token, _), bias)| (token.clone(), *bias))
+            .collect()
+    }
+
     fn affinity_scale_for(&self, cell: &NodeCell) -> f32 {
         let mut scale = self.harmony.affinity_scale;
         if cell.adreno_tag {
@@ -738,6 +803,173 @@ impl ClusterField {
                     events: vec![event],
                 })
             }
+            LqlAst::Intend {
+                tokens,
+                weights,
+                horizon_ms,
+                budget,
+            } => {
+                let intention = Intention {
+                    focus_tokens: tokens.clone(),
+                    weights: weights.clone(),
+                    horizon_ms,
+                    budget,
+                };
+                self.variant_layer.set_intention(intention.clone());
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "intention": {
+                            "tokens": tokens,
+                            "weights": weights,
+                            "horizon_ms": horizon_ms,
+                            "budget": budget,
+                        }
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Intend(LqlIntendResult {
+                        tokens: intention.focus_tokens,
+                        weights: intention.weights,
+                        horizon_ms: intention.horizon_ms,
+                        budget: intention.budget,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Variants {
+                limit,
+                min_probability,
+            } => {
+                let ranked = self
+                    .variant_layer
+                    .rank_variants(limit, min_probability)
+                    .into_iter()
+                    .map(|score| LqlVariantInfo {
+                        id: score.id,
+                        title: score.title,
+                        probability: score.probability,
+                        effort: score.effort,
+                        score: score.score,
+                        evidence: score.evidence,
+                        risk: score.risk,
+                        expected_gain: score.expected_gain,
+                    })
+                    .collect::<Vec<_>>();
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "variants": ranked,
+                        "limit": limit,
+                        "min_probability": min_probability,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Variants(LqlVariantsResult {
+                        limit,
+                        min_probability,
+                        variants: ranked,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::SlideSet {
+                id,
+                variants,
+                goals,
+                ethics_guard,
+            } => {
+                let slide = Slide {
+                    id: id.clone(),
+                    variant_ids: variants.clone(),
+                    desired_metrics: goals.clone(),
+                    ethics_guard,
+                };
+                self.variant_layer.set_slide(slide.clone());
+                let event = json!({
+                    "ev": "manifold",
+                    "meta": {
+                        "slide": slide,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Slide(LqlSlideResult {
+                        id,
+                        variant_ids: variants,
+                        desired_metrics: goals,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Commit { variant_id } => {
+                let Some(outcome) = self.variant_layer.commit(&variant_id, self.now_ms) else {
+                    return Err(LqlError::new(format!("unknown variant {variant_id}")));
+                };
+                let seeds = self.plant_variant_seeds(&variant_id);
+                let event = json!({
+                    "ev": "commit",
+                    "meta": {
+                        "variant": outcome.variant_id,
+                        "seeds": seeds.clone(),
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Commit(LqlCommitResult {
+                        variant_id: outcome.variant_id,
+                        seeds,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Pivot { from, to, reason } => {
+                let Some(outcome) = self.variant_layer.pivot(&from, &to, self.now_ms) else {
+                    return Err(LqlError::new("unable to pivot: variant mismatch"));
+                };
+                let event = json!({
+                    "ev": "pivot",
+                    "meta": {
+                        "from": outcome.from,
+                        "to": outcome.to,
+                        "reason": reason,
+                        "inertia": outcome.inertia,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Pivot(LqlPivotResult {
+                        from: outcome.from,
+                        to: outcome.to,
+                        inertia: outcome.inertia,
+                        reason,
+                    })),
+                    events: vec![event],
+                })
+            }
+            LqlAst::Defuse { pendulum_id, drain } => {
+                let Some(outcome) = self.variant_layer.defuse(&pendulum_id, drain) else {
+                    return Err(LqlError::new("unknown pendulum"));
+                };
+                let event = json!({
+                    "ev": "defuse",
+                    "meta": {
+                        "pendulum": outcome.pendulum_id,
+                        "drain_rate": outcome.new_drain,
+                    }
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: Some(LqlResponse::Defuse(LqlDefuseResult {
+                        pendulum_id: outcome.pendulum_id,
+                        previous_drain: outcome.previous_drain,
+                        new_drain: outcome.new_drain,
+                    })),
+                    events: vec![event],
+                })
+            }
             LqlAst::Unsubscribe { id } => {
                 let removed = self.views.remove_view(id);
                 let payload = LqlUnsubscribeResult { id, removed };
@@ -750,6 +982,59 @@ impl ClusterField {
                 .to_string();
                 Ok(LqlExecResult {
                     response: Some(LqlResponse::Unsubscribe(payload)),
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexOn => {
+                self.set_reflex_enabled(true);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": true, "cfg": self.reflex_cfg()}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexOff => {
+                self.set_reflex_enabled(false);
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": false}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexStatus => {
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {
+                        "reflex_status": {
+                            "enabled": self.reflex_enabled(),
+                            "cfg": self.reflex_cfg(),
+                            "last_report": self.reflex_last_report(),
+                        }
+                    },
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
+                    events: vec![event],
+                })
+            }
+            LqlAst::ReflexTune { cfg } => {
+                *self.reflex_cfg_mut() = cfg;
+                let event = json!({
+                    "ev": "lql",
+                    "meta": {"reflex": {"enabled": self.reflex_enabled(), "cfg": self.reflex_cfg()}},
+                })
+                .to_string();
+                Ok(LqlExecResult {
+                    response: None,
                     events: vec![event],
                 })
             }
@@ -1829,7 +2114,25 @@ impl ClusterField {
             });
             events.push(event.to_string());
         }
+        let seed_events = self.tick_seed_garden();
+        events.extend(seed_events);
         self.awaken_tick();
+        events
+    }
+
+    pub fn seed_garden(&self) -> &SeedGarden {
+        &self.seed_garden
+    }
+
+    pub fn seed_garden_mut(&mut self) -> &mut SeedGarden {
+        &mut self.seed_garden
+    }
+
+    pub fn tick_seed_garden(&mut self) -> Vec<String> {
+        let now = self.now_ms;
+        let mut garden = std::mem::take(&mut self.seed_garden);
+        let events = tick_garden(self, &mut garden, now);
+        self.seed_garden = garden;
         events
     }
 
@@ -1937,6 +2240,70 @@ impl ClusterField {
 
     pub fn symmetry_snapshot(&self) -> HarmonySnapshot {
         self.reflex_engine.snapshot()
+    }
+
+    pub fn reflex_cfg(&self) -> &ReflexCfg {
+        self.reflex_feedback.cfg()
+    }
+
+    pub fn reflex_cfg_mut(&mut self) -> &mut ReflexCfg {
+        self.reflex_feedback.cfg_mut()
+    }
+
+    pub fn set_reflex_enabled(&mut self, enabled: bool) {
+        self.reflex_feedback.set_enabled(enabled);
+    }
+
+    pub fn reflex_enabled(&self) -> bool {
+        self.reflex_feedback.enabled()
+    }
+
+    pub fn record_reflex_snapshot(&mut self, snapshot: ReflexSnapshot) -> Option<ReflexReport> {
+        self.reflex_feedback.push_snapshot(snapshot);
+        let cfg_snapshot = self.reflex_feedback.cfg().clone();
+        let ctx = ReflexContext {
+            cfg: &cfg_snapshot,
+            slo_latency_ms: 320.0,
+            neighbors: self.reflex_neighbors(),
+            now_ms: self.now_ms,
+        };
+        let report = self.reflex_feedback.next_report(ctx);
+        if let Some(report) = &report {
+            if let Some(action) = &report.action {
+                apply_action(self, self.now_ms, action);
+                let cooldown = cooldown_for(action, self.reflex_feedback.cfg());
+                self.reflex_feedback
+                    .record_action(action.kind(), self.now_ms, cooldown);
+            }
+            self.reflex_reports.push_back(report.clone());
+            while self.reflex_reports.len() > 128 {
+                self.reflex_reports.pop_front();
+            }
+        }
+        report
+    }
+
+    pub fn reflex_reports(&self) -> impl Iterator<Item = &ReflexReport> {
+        self.reflex_reports.iter()
+    }
+
+    pub fn reflex_last_report(&self) -> Option<&ReflexReport> {
+        self.reflex_reports.back()
+    }
+
+    pub fn drain_route_bias(&mut self, factor: f32) {
+        let decay = (1.0 - factor).clamp(0.0, 1.0);
+        for value in self.route_bias.values_mut() {
+            *value *= decay;
+        }
+    }
+
+    pub fn apply_dampening(&mut self, now_ms: u64, strength: f32, ttl_ms: u64) {
+        let effect = NoradrenalineEffect {
+            until_ms: now_ms.saturating_add(ttl_ms),
+            strength: strength.clamp(0.0, 1.0),
+        };
+        self.noradrenaline = Some(effect);
     }
 
     pub fn mirror_epochs_iter(&self) -> impl Iterator<Item = &Epoch> {
@@ -2513,8 +2880,8 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.influences = vec![ResonantInfluence {
             source: 5,
-            target: 6,
-            impact: 0.66,
+            sink: 6,
+            weight: 0.66,
             ..Default::default()
         }];
         let exec = field
@@ -2531,7 +2898,7 @@ mod tests {
             .expect("influences array");
         assert_eq!(influences.len(), 1);
         assert_eq!(influences[0]["source"].as_u64(), Some(5));
-        assert_eq!(influences[0]["target"].as_u64(), Some(6));
+        assert_eq!(influences[0]["sink"].as_u64(), Some(6));
     }
 
     #[test]
@@ -2539,16 +2906,14 @@ mod tests {
         let mut field = ClusterField::new();
         field.resonant_model.tensions = vec![
             ResonantTension {
-                from: 8,
-                to: 9,
-                tension: 0.55,
-                ..Default::default()
+                node: 8,
+                magnitude: 0.55,
+                relief: 0.1,
             },
             ResonantTension {
-                from: 10,
-                to: 11,
-                tension: 0.52,
-                ..Default::default()
+                node: 11,
+                magnitude: 0.52,
+                relief: 0.2,
             },
         ];
         let exec = field
@@ -2559,8 +2924,8 @@ mod tests {
             .as_array()
             .expect("tensions array");
         assert_eq!(tensions.len(), 2);
-        assert_eq!(tensions[0]["from"].as_u64(), Some(8));
-        assert_eq!(tensions[1]["to"].as_u64(), Some(11));
+        assert_eq!(tensions[0]["node"].as_u64(), Some(8));
+        assert_eq!(tensions[1]["node"].as_u64(), Some(11));
     }
 
     #[test]

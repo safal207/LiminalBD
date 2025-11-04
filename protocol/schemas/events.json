@@ -1,0 +1,249 @@
+{
+  "$id": "https://liminaldb.dev/schema/v1/events.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LiminalDB Events",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "event": {
+      "oneOf": [
+        { "$ref": "#/definitions/LqlEvent" },
+        { "$ref": "#/definitions/ViewEvent" },
+        { "$ref": "#/definitions/HarmonyEvent" },
+        { "$ref": "#/definitions/DreamEvent" },
+        { "$ref": "#/definitions/CollectiveDreamEvent" },
+        { "$ref": "#/definitions/AwakenEvent" },
+        { "$ref": "#/definitions/EchoEvent" },
+        { "$ref": "#/definitions/StatusEvent" },
+        { "$ref": "#/definitions/ExplainEvent" },
+        { "$ref": "#/definitions/SeedEvent" },
+        { "$ref": "#/definitions/MirrorEvent" },
+        { "$ref": "#/definitions/NoeticEvent" },
+        { "$ref": "#/definitions/AuditEvent" },
+        { "$ref": "#/definitions/AlertEvent" }
+      ]
+    }
+  },
+  "required": ["version", "event"],
+  "additionalProperties": false,
+  "definitions": {
+    "BaseEvent": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "ts": { "type": "string", "format": "date-time" },
+        "correlationId": { "type": "string" }
+      },
+      "required": ["id", "ts"],
+      "additionalProperties": false
+    },
+    "LqlEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "lql" },
+            "result": { "type": "array", "items": { "type": "object" } }
+          },
+          "required": ["kind", "result"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ViewEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "view" },
+            "stream": { "type": "string" },
+            "payload": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "stream", "payload"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "HarmonyEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "harmony" },
+            "score": { "type": "number" },
+            "trend": { "type": "string", "enum": ["up", "down", "steady"] }
+          },
+          "required": ["kind", "score"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DreamEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "dream" },
+            "phase": { "type": "string" },
+            "details": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "phase"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CollectiveDreamEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "collective_dream" },
+            "members": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["kind", "members"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AwakenEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "awaken" },
+            "summary": { "type": "string" }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EchoEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "echo" },
+            "status": { "type": "string" }
+          },
+          "required": ["kind", "status"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "StatusEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "status" },
+            "state": { "type": "string" },
+            "metrics": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "state"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ExplainEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "explain" },
+            "explanation": { "type": "string" }
+          },
+          "required": ["kind", "explanation"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SeedEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "seed" },
+            "status": { "type": "string", "enum": ["planted", "growing", "harvested", "aborted"] },
+            "yield": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "status"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "MirrorEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "mirror" },
+            "entries": { "type": "array", "items": { "type": "object" } }
+          },
+          "required": ["kind", "entries"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "NoeticEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "noetic" },
+            "stage": { "type": "string", "enum": ["proposed", "voting", "committed"] },
+            "context": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "stage"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AuditEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "audit" },
+            "actor": { "type": "string" },
+            "action": { "type": "string" },
+            "details": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["kind", "actor", "action"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AlertEvent": {
+      "allOf": [
+        { "$ref": "#/definitions/BaseEvent" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "alert" },
+            "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+            "message": { "type": "string" }
+          },
+          "required": ["kind", "severity", "message"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

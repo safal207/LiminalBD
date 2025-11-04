@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::slice;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use liminal_core::life_loop::run_loop;
 use liminal_core::types::Hint;
@@ -16,10 +16,23 @@ use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 
+use blake3::Hasher;
+use liminal_bridge_net::noetic::consensus::{
+    ConsensusEngine, NoeticEvent, Phase, Proposal, ProposalObject, VoteDecision,
+};
+use liminal_bridge_net::noetic::crdt::Hlc;
+use liminal_bridge_net::noetic::state::{
+    NoeticState, PolicyBundle, ResonantModelHeader, ResonantModelTopK, SeedHeader, SeedStatus,
+    Summary,
+};
+use liminal_bridge_net::peers::{GossipManager, PeerId, PeerInfo};
+use rand::rngs::OsRng;
+use rand::RngCore;
+
 use crate::protocol::{
     adjust_tick, event_from_field_log, event_from_hint, event_from_impulse_log, event_from_metrics,
-    event_from_snapshot, BridgeConfig, IntrospectRequest, IntrospectTarget, Outbox,
-    ProtocolCommand, ProtocolMetrics, ProtocolPush,
+    event_from_snapshot, BridgeConfig, IntrospectRequest, IntrospectTarget, NoeticObjectKind,
+    Outbox, PeerSpec, ProtocolCommand, ProtocolMetrics, ProtocolPush,
 };
 
 struct BridgeState {
@@ -29,12 +42,97 @@ struct BridgeState {
     #[allow(dead_code)]
     journal: Option<Arc<DiskJournal>>,
     snapshot_cfg: Option<SnapshotConfig>,
+    namespace: String,
+    gossip: Arc<GossipManager>,
+    noetic: StdMutex<NoeticRuntime>,
 }
 
 #[derive(Clone)]
 struct SnapshotConfig {
     interval: Duration,
     max_wal_events: u64,
+}
+
+struct NoeticRuntime {
+    local_peer: PeerId,
+    local_credence: f32,
+    state: NoeticState,
+    consensus: ConsensusEngine,
+}
+
+impl NoeticRuntime {
+    fn new(local_peer: PeerId) -> Self {
+        let mut state = NoeticState::new(local_peer);
+        let local_credence = 1.0;
+        state.set_credence(local_peer, local_credence);
+        NoeticRuntime {
+            local_peer,
+            local_credence,
+            state,
+            consensus: ConsensusEngine::new(0.6),
+        }
+    }
+
+    fn tick_clock(&mut self) -> Hlc {
+        let now = now_ms();
+        self.state.clock.tick(now);
+        self.state.clock
+    }
+
+    fn register_peer(&mut self, peer: PeerId, credence: f32) {
+        self.state.set_credence(peer, credence);
+    }
+
+    fn set_quorum(&mut self, quorum: f32) -> f32 {
+        self.consensus.set_quorum(quorum);
+        self.consensus.quorum()
+    }
+
+    fn process_event(&mut self, event: NoeticEvent) -> Vec<JsonValue> {
+        let mut events = Vec::new();
+        if let Ok(json) = serde_json::to_value(&event) {
+            events.push(json);
+        }
+        if matches!(event.meta.phase, Phase::Commit) {
+            if let Some(proposal) = self.consensus.proposals().get(&event.meta.id).cloned() {
+                self.apply_commit(&proposal, &mut events);
+            }
+        }
+        events
+    }
+
+    fn apply_commit(&mut self, proposal: &Proposal, events: &mut Vec<JsonValue>) {
+        let now = now_ms();
+        self.state.clock = self
+            .state
+            .clock
+            .merged(&proposal.clock, self.local_peer, now);
+        match &proposal.object {
+            ProposalObject::Model { header, topk } => {
+                self.state.apply_model_header(header.clone());
+                self.state
+                    .update_model_topk(topk.entries.clone(), topk.updated);
+            }
+            ProposalObject::Seed { header, status } => {
+                self.state.apply_seed(header.clone());
+                self.state
+                    .update_seed_status(status.clone(), proposal.clock);
+            }
+            ProposalObject::Policy { bundle } => {
+                self.state.update_policy(bundle.clone());
+            }
+        }
+        let summary = self.state.summary();
+        events.push(build_merge_event(&summary));
+    }
+
+    fn local_peer(&self) -> PeerId {
+        self.local_peer
+    }
+
+    fn local_credence(&self) -> f32 {
+        self.local_credence
+    }
 }
 
 static STATE: OnceLock<BridgeState> = OnceLock::new();
@@ -86,12 +184,28 @@ impl BridgeState {
         let outbox = Arc::new(StdMutex::new(Outbox::default()));
         let tick_ms = Arc::new(AtomicU32::new(config.tick_ms));
 
+        let namespace = "liminal".to_string();
+        let local_peer = generate_peer_id();
+        let gossip = Arc::new(GossipManager::new(local_peer));
+        let noetic_runtime = NoeticRuntime::new(local_peer);
+        let local_info = PeerInfo {
+            id: local_peer,
+            url: "local".into(),
+            namespace: namespace.clone(),
+            credence: noetic_runtime.local_credence(),
+            last_seen_ms: now_ms(),
+        };
+        gossip.register_peer(local_info);
+
         let state = BridgeState {
             runtime,
             field: field.clone(),
             outbox: outbox.clone(),
             journal,
             snapshot_cfg,
+            namespace,
+            gossip,
+            noetic: StdMutex::new(noetic_runtime),
         };
 
         state.start_life_loop(config.tick_ms, outbox.clone(), tick_ms);
@@ -178,6 +292,134 @@ impl BridgeState {
                 }
             }
         });
+    }
+
+    fn handle_peer_add(&self, spec: PeerSpec) -> Result<Vec<JsonValue>, String> {
+        let namespace = spec.namespace.unwrap_or_else(|| self.namespace.clone());
+        let credence = spec.credence.clamp(0.0, 1.0);
+        let peer_id = derive_peer_id(&spec.url, &namespace);
+        let info = PeerInfo {
+            id: peer_id,
+            url: spec.url,
+            namespace,
+            credence,
+            last_seen_ms: now_ms(),
+        };
+        self.gossip.register_peer(info.clone());
+        if let Ok(mut guard) = self.noetic.lock() {
+            guard.register_peer(peer_id, credence);
+        }
+        let peer_json = serde_json::to_value(info).map_err(|e| e.to_string())?;
+        Ok(vec![json!({
+            "ev": "peers",
+            "meta": {
+                "action": "add",
+                "peer": peer_json,
+            }
+        })])
+    }
+
+    fn handle_peer_list(&self) -> Vec<JsonValue> {
+        let peers: Vec<JsonValue> = self
+            .gossip
+            .peers()
+            .into_iter()
+            .map(|info| serde_json::to_value(info).unwrap_or(JsonValue::Null))
+            .collect();
+        vec![json!({
+            "ev": "peers",
+            "meta": {
+                "action": "list",
+                "peers": peers,
+            }
+        })]
+    }
+
+    fn handle_noetic_quorum(&self, quorum: f32) -> Vec<JsonValue> {
+        let new_quorum = {
+            let mut guard = self.noetic.lock().expect("noetic mutex poisoned");
+            guard.set_quorum(quorum.clamp(0.0, 1.0))
+        };
+        vec![json!({
+            "ev": "noetic",
+            "meta": {
+                "phase": "quorum",
+                "q": new_quorum,
+            }
+        })]
+    }
+
+    fn handle_noetic_propose(
+        &self,
+        obj: NoeticObjectKind,
+        data: JsonValue,
+    ) -> Result<Vec<JsonValue>, String> {
+        let mut guard = self.noetic.lock().expect("noetic mutex poisoned");
+        let mut events = Vec::new();
+        match obj {
+            NoeticObjectKind::Model => {
+                let local_peer = guard.local_peer();
+                let local_credence = guard.local_credence();
+                let clock = guard.tick_clock();
+                let (header, topk) = build_model_proposal(&data, local_peer, clock)?;
+                let event = guard
+                    .consensus
+                    .propose_model(local_peer, header, topk, clock);
+                let proposal_id = event.meta.id;
+                events.extend(guard.process_event(event));
+                let vote_clock = guard.tick_clock();
+                if let Some(vote_event) = guard.consensus.vote(
+                    proposal_id,
+                    local_peer,
+                    VoteDecision::Approve,
+                    local_credence,
+                    vote_clock,
+                ) {
+                    events.extend(guard.process_event(vote_event));
+                }
+            }
+            NoeticObjectKind::Seed => {
+                let local_peer = guard.local_peer();
+                let local_credence = guard.local_credence();
+                let clock = guard.tick_clock();
+                let (header, status) = build_seed_proposal(&data, local_peer, clock)?;
+                let event = guard
+                    .consensus
+                    .propose_seed(local_peer, header, status, clock);
+                let proposal_id = event.meta.id;
+                events.extend(guard.process_event(event));
+                let vote_clock = guard.tick_clock();
+                if let Some(vote_event) = guard.consensus.vote(
+                    proposal_id,
+                    local_peer,
+                    VoteDecision::Approve,
+                    local_credence,
+                    vote_clock,
+                ) {
+                    events.extend(guard.process_event(vote_event));
+                }
+            }
+            NoeticObjectKind::Policy => {
+                let local_peer = guard.local_peer();
+                let local_credence = guard.local_credence();
+                let clock = guard.tick_clock();
+                let bundle = build_policy_bundle(&data, clock)?;
+                let event = guard.consensus.propose_policy(local_peer, bundle, clock);
+                let proposal_id = event.meta.id;
+                events.extend(guard.process_event(event));
+                let vote_clock = guard.tick_clock();
+                if let Some(vote_event) = guard.consensus.vote(
+                    proposal_id,
+                    local_peer,
+                    VoteDecision::Approve,
+                    local_credence,
+                    vote_clock,
+                ) {
+                    events.extend(guard.process_event(vote_event));
+                }
+            }
+        }
+        Ok(events)
     }
 }
 
@@ -598,6 +840,68 @@ pub extern "C" fn liminal_push(msg_cbor: *const u8, len: usize) -> usize {
                     push_json_event(&mut outbox, payload);
                 }
             }
+            ProtocolCommand::PeerAdd { peer } => {
+                let result = state.handle_peer_add(peer);
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    match result {
+                        Ok(events) => {
+                            for event in events {
+                                push_json_event(&mut outbox, event);
+                            }
+                        }
+                        Err(err) => {
+                            push_json_event(
+                                &mut outbox,
+                                json!({
+                                    "ev": "peers",
+                                    "meta": {
+                                        "action": "error",
+                                        "reason": err,
+                                    }
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+            ProtocolCommand::PeerList => {
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    for event in state.handle_peer_list() {
+                        push_json_event(&mut outbox, event);
+                    }
+                }
+            }
+            ProtocolCommand::NoeticPropose { obj, data } => {
+                let result = state.handle_noetic_propose(obj, data);
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    match result {
+                        Ok(events) => {
+                            for event in events {
+                                push_json_event(&mut outbox, event);
+                            }
+                        }
+                        Err(err) => {
+                            push_json_event(
+                                &mut outbox,
+                                json!({
+                                    "ev": "noetic",
+                                    "meta": {
+                                        "phase": "error",
+                                        "reason": err,
+                                    }
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+            ProtocolCommand::NoeticQuorum { q } => {
+                if let Ok(mut outbox) = state.outbox.lock() {
+                    for event in state.handle_noetic_quorum(q) {
+                        push_json_event(&mut outbox, event);
+                    }
+                }
+            }
             ProtocolCommand::Introspect(IntrospectRequest { target, top }) => {
                 let event = state.runtime.block_on({
                     let field = state.field.clone();
@@ -701,6 +1005,181 @@ fn build_introspect_event(
             })
         }
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn generate_peer_id() -> PeerId {
+    let mut rng = OsRng;
+    let mut bytes = [0u8; 32];
+    rng.fill_bytes(&mut bytes);
+    PeerId::new(bytes)
+}
+
+fn derive_peer_id(url: &str, namespace: &str) -> PeerId {
+    let mut hasher = Hasher::new();
+    hasher.update(url.as_bytes());
+    hasher.update(namespace.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(digest.as_bytes());
+    PeerId::new(bytes)
+}
+
+fn build_merge_event(summary: &Summary) -> JsonValue {
+    json!({
+        "ev": "crdt_merge",
+        "meta": {
+            "peer": summary.peer,
+            "digest": summary.digest,
+            "models": summary.model_count,
+            "epochs": summary.epoch_count,
+            "seeds": summary.seed_count,
+            "topk_clock": {
+                "peer": summary.topk_clock.node,
+                "phys_ms": summary.topk_clock.phys_ms,
+                "log": summary.topk_clock.log,
+            },
+            "policy_clock": {
+                "peer": summary.policy_clock.node,
+                "phys_ms": summary.policy_clock.phys_ms,
+                "log": summary.policy_clock.log,
+            },
+            "credence_sum": summary.credence_sum,
+        }
+    })
+}
+
+fn build_model_proposal(
+    data: &JsonValue,
+    local_peer: PeerId,
+    clock: Hlc,
+) -> Result<(ResonantModelHeader, ResonantModelTopK), String> {
+    let model: ResonantModel = serde_json::from_value(data.clone()).map_err(|e| e.to_string())?;
+    let serialized = serde_json::to_vec(&model).map_err(|e| e.to_string())?;
+    let mut hasher = Hasher::new();
+    hasher.update(&serialized);
+    let digest = hasher.finalize().to_hex().to_string();
+    let header = ResonantModelHeader {
+        id: digest.clone(),
+        version: clock,
+        hash: digest,
+        source: local_peer,
+    };
+    let entries = model_entries(&model);
+    let topk = ResonantModelTopK::new(entries, clock);
+    Ok((header, topk))
+}
+
+fn model_entries(model: &ResonantModel) -> Vec<String> {
+    let mut entries = Vec::new();
+    for edge in model.edges.iter().take(8) {
+        entries.push(format!(
+            "edge:{}->{}:{:.3}:{:.3}",
+            edge.from, edge.to, edge.weight, edge.coherence
+        ));
+    }
+    for influence in model.influences.iter().take(8) {
+        entries.push(format!(
+            "influence:{}->{}:{:.3}:{:.3}",
+            influence.source, influence.sink, influence.weight, influence.coherence
+        ));
+    }
+    for tension in model.tensions.iter().take(8) {
+        entries.push(format!(
+            "tension:{}:{:.3}:{:.3}",
+            tension.node, tension.magnitude, tension.relief
+        ));
+    }
+    entries
+}
+
+fn build_seed_proposal(
+    data: &JsonValue,
+    local_peer: PeerId,
+    clock: Hlc,
+) -> Result<(SeedHeader, SeedStatus), String> {
+    let id = data
+        .get("id")
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_u64().map(|v| v.to_string()))
+        })
+        .ok_or_else(|| "seed.id missing".to_string())?;
+    let epoch = data.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0);
+    let status = parse_seed_status(data)?;
+    let header = SeedHeader {
+        id,
+        epoch,
+        version: clock,
+        source: local_peer,
+    };
+    Ok((header, status))
+}
+
+fn parse_seed_status(data: &JsonValue) -> Result<SeedStatus, String> {
+    let status = data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending")
+        .to_ascii_lowercase();
+    match status.as_str() {
+        "pending" => Ok(SeedStatus::Pending),
+        "active" => {
+            let started = data
+                .get("started_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(now_ms);
+            Ok(SeedStatus::Active {
+                started_ms: started,
+            })
+        }
+        "committed" => {
+            let finished = data
+                .get("finished_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(now_ms);
+            Ok(SeedStatus::Committed {
+                finished_ms: finished,
+            })
+        }
+        "failed" => {
+            let error = data
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown failure")
+                .to_string();
+            Ok(SeedStatus::Failed { error })
+        }
+        "observed" => {
+            let note = data
+                .get("note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(SeedStatus::Observed { note })
+        }
+        other => Err(format!("unsupported seed status: {other}")),
+    }
+}
+
+fn build_policy_bundle(data: &JsonValue, clock: Hlc) -> Result<PolicyBundle, String> {
+    let payload = data.clone();
+    let serialized = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    let mut hasher = Hasher::new();
+    hasher.update(&serialized);
+    let hash = hasher.finalize().to_hex().to_string();
+    Ok(PolicyBundle {
+        version: clock,
+        hash,
+        payload,
+    })
 }
 
 fn top_nodes(field: &ClusterField, limit: usize) -> Vec<JsonValue> {

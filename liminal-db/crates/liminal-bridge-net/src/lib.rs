@@ -1,3 +1,5 @@
+pub mod noetic;
+pub mod peers;
 pub mod stream_codec;
 pub mod ws_client;
 pub mod ws_server;

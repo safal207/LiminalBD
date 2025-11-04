@@ -130,23 +130,20 @@ mod tests {
         field.cells.get_mut(&protected).unwrap().energy = 0.55;
         field.cells.get_mut(&protected).unwrap().salience = 0.8;
 
-        let model = ResonantModel {
-            edges: Vec::new(),
-            influences: Vec::new(),
-            tensions: vec![
-                Tension {
-                    node: low,
-                    magnitude: 0.9,
-                    relief: 0.2,
-                },
-                Tension {
-                    node: protected,
-                    magnitude: 0.7,
-                    relief: 0.2,
-                },
-            ],
-            coherence: 0.6,
-        };
+        let mut model = ResonantModel::default();
+        model.coherence = 0.6;
+        model.tensions = vec![
+            Tension {
+                node: low,
+                magnitude: 0.9,
+                relief: 0.2,
+            },
+            Tension {
+                node: protected,
+                magnitude: 0.7,
+                relief: 0.2,
+            },
+        ];
 
         let cfg = AwakeningConfig {
             max_nodes: 3,

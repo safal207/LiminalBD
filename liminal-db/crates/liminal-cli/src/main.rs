@@ -22,8 +22,8 @@ use liminal_core::types::{Hint, Impulse, ImpulseKind};
 use liminal_core::{
     detect_sync_groups, parse_lql, replay_epoch_by_id, run_collective_dream, AwakeningConfig,
     AwakeningReport, ClusterField, DreamConfig, Epoch, HarmonySnapshot, Influence, LqlResponse,
-    MirrorTimeline, ReflexAction, ReflexRule, ReflexWhen, ReplayConfig, ReplayReport,
-    ResonantModel, SyncConfig, Tension, TrsConfig, ViewStats,
+    MirrorTimeline, ReflexCfg, ReplayConfig, ReplayReport, ResonantModel, SyncConfig, Tension,
+    TrsConfig, ViewStats,
 };
 #[cfg(test)]
 use liminal_core::{HarmonyMetrics, MirrorImpulse, SymmetryStatus};
@@ -41,7 +41,8 @@ async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut args = std::env::args().skip(1);
     let mut pipe_cbor = false;
-    let mut store_path: Option<PathBuf> = None;
+    let mut store_uri: Option<String> = None;
+    let mut metrics_dir: Option<PathBuf> = None;
     let mut snap_interval_secs: u64 = 60;
     let mut snap_maxwal: u64 = 5_000;
     let mut ws_port: u16 = 8787;
@@ -55,7 +56,19 @@ async fn main() -> Result<()> {
                 let Some(path) = args.next() else {
                     return Err(anyhow!("--store requires a path"));
                 };
-                store_path = Some(PathBuf::from(path));
+                store_uri = Some(format!("sled://{}", path));
+            }
+            "--store-uri" => {
+                let Some(uri) = args.next() else {
+                    return Err(anyhow!("--store-uri requires a value"));
+                };
+                store_uri = Some(uri);
+            }
+            "--metrics-dir" => {
+                let Some(dir) = args.next() else {
+                    return Err(anyhow!("--metrics-dir requires a path"));
+                };
+                metrics_dir = Some(PathBuf::from(dir));
             }
             "--snap-interval" => {
                 let Some(value) = args.next() else {
@@ -118,10 +131,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store_config = store_path.map(|path| StoreRuntimeConfig {
-        path,
+    let store_backend = parse_store_backend(store_uri.as_deref().unwrap_or("sled://./data"))?;
+
+    let store_config = Some(StoreRuntimeConfig {
+        backend: store_backend,
         snap_interval: Duration::from_secs(snap_interval_secs),
         max_wal_events: snap_maxwal,
+        metrics_dir,
     });
 
     let ws_runtime = WsRuntimeConfig {
@@ -139,9 +155,47 @@ async fn main() -> Result<()> {
 
 #[derive(Clone)]
 struct StoreRuntimeConfig {
-    path: PathBuf,
+    backend: StoreBackend,
     snap_interval: Duration,
     max_wal_events: u64,
+    #[allow(dead_code)]
+    metrics_dir: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+enum StoreBackend {
+    Sled { path: PathBuf },
+}
+
+fn parse_store_backend(uri: &str) -> Result<StoreBackend> {
+    let (scheme, rest) = uri
+        .split_once("://")
+        .ok_or_else(|| anyhow!("invalid store uri: {uri}"))?;
+    match scheme {
+        "sled" => {
+            let path = if rest.is_empty() {
+                PathBuf::from("./data")
+            } else {
+                PathBuf::from(rest)
+            };
+            Ok(StoreBackend::Sled { path })
+        }
+        other => Err(anyhow!("unsupported store backend: {other}")),
+    }
+}
+
+impl StoreBackend {
+    fn open_journal(&self) -> Result<DiskJournal> {
+        match self {
+            StoreBackend::Sled { path } => DiskJournal::open(path),
+        }
+    }
+
+    fn as_path(&self) -> Option<&Path> {
+        match self {
+            StoreBackend::Sled { path } => Some(path.as_path()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -157,7 +211,7 @@ async fn run_interactive(
     mirror_interval_ms: u64,
 ) -> Result<()> {
     let (mut field, journal, store_cfg) = if let Some(cfg) = store.clone() {
-        let journal = StdArc::new(DiskJournal::open(&cfg.path)?);
+        let journal = StdArc::new(cfg.backend.open_journal()?);
         let (mut field, replay_offset) =
             if let Some((seed, offset)) = journal.load_latest_snapshot()? {
                 (seed.into_field(), offset)
@@ -382,6 +436,18 @@ async fn run_interactive(
                             }
                         }
                     }
+                    command
+                        if command.starts_with("variants")
+                            || command.starts_with("intend")
+                            || command.starts_with("slide")
+                            || command.starts_with("commit")
+                            || command.starts_with("pivot")
+                            || command.starts_with("defuse") =>
+                    {
+                        if let Err(err) = run_lql_query(&field_for_cli, command).await {
+                            eprintln!("LQL command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("reflex") => {
                         handle_reflex_command(
                             command.trim_start_matches("reflex").trim(),
@@ -486,6 +552,27 @@ async fn run_interactive(
                             eprintln!("mirror command failed: {err}");
                         }
                     }
+                    command if command.starts_with("peers") => {
+                        if let Err(err) = handle_peer_command(
+                            command.trim_start_matches("peers").trim(),
+                            &remote_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("peers command failed: {err}");
+                        }
+                    }
+                    command if command.starts_with("noetic") => {
+                        if let Err(err) = handle_noetic_command(
+                            command.trim_start_matches("noetic").trim(),
+                            &field_for_cli,
+                            &remote_for_cli,
+                        )
+                        .await
+                        {
+                            eprintln!("noetic command failed: {err}");
+                        }
+                    }
                     command if command.starts_with("ws") => {
                         if let Err(err) = handle_ws_command(
                             command.trim_start_matches("ws").trim(),
@@ -522,25 +609,8 @@ async fn run_interactive(
                     if query.is_empty() {
                         eprintln!("usage: lql <SELECT|SUBSCRIBE|UNSUBSCRIBE ...>");
                     } else {
-                        match parse_lql(query) {
-                            Ok(ast) => {
-                                let outcome = {
-                                    let mut guard = field_for_cli.lock().await;
-                                    guard.exec_lql(ast)
-                                };
-                                match outcome {
-                                    Ok(result) => {
-                                        if let Some(response) = result.response {
-                                            print_lql_response(&response);
-                                        }
-                                        for event in result.events {
-                                            print_event_line(&event);
-                                        }
-                                    }
-                                    Err(err) => eprintln!("LQL execution failed: {}", err),
-                                }
-                            }
-                            Err(err) => eprintln!("LQL parse error: {}", err),
+                        if let Err(err) = run_lql_query(&field_for_cli, query).await {
+                            eprintln!("LQL execution failed: {}", err);
                         }
                     }
                     continue;
@@ -566,9 +636,11 @@ async fn run_interactive(
 async fn run_pipe_cbor(store: Option<StoreRuntimeConfig>) -> Result<()> {
     let config = BridgeConfig {
         tick_ms: 200,
-        store_path: store
-            .as_ref()
-            .map(|cfg| cfg.path.to_string_lossy().to_string()),
+        store_path: store.as_ref().and_then(|cfg| {
+            cfg.backend
+                .as_path()
+                .map(|p| p.to_string_lossy().to_string())
+        }),
         snap_interval: store
             .as_ref()
             .map(|cfg| cfg.snap_interval.as_secs().min(u64::from(u32::MAX)) as u32),
@@ -695,84 +767,105 @@ async fn export_snapshot(field: &StdArc<Mutex<ClusterField>>, path: &Path) -> Re
 }
 
 async fn handle_reflex_command(command: &str, field: &StdArc<Mutex<ClusterField>>) {
-    let mut parts = command.splitn(2, ' ');
-    let sub = parts.next().unwrap_or("").trim();
-    let rest = parts.next().unwrap_or("").trim();
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("");
     match sub {
         "" | "help" => {
-            eprintln!("usage: :reflex <add|list|rm> ...");
+            eprintln!(
+                "usage: :reflex on|off|status|tune win=<ms> eps=<f32> step=<f32> hyster=<f32> cd=<ms> min_gain=<f32>"
+            );
         }
-        "add" => {
-            if rest.is_empty() {
-                eprintln!("usage: :reflex add <json>");
-                return;
-            }
-            match serde_json::from_str::<ReflexAddRequest>(rest) {
-                Ok(spec) => {
-                    let ReflexAddRequest {
-                        token,
-                        kind,
-                        min_strength,
-                        window_ms,
-                        min_count,
-                        then,
-                        enabled,
-                    } = spec;
-                    let rule = ReflexRule {
-                        id: 0,
-                        when: ReflexWhen {
-                            token,
-                            kind,
-                            min_strength,
-                            window_ms,
-                            min_count,
-                        },
-                        then,
-                        enabled,
-                    };
-                    let id = {
-                        let mut guard = field.lock().await;
-                        guard.add_reflex(rule)
-                    };
-                    println!("REFLEX_ADDED id={}", id);
-                }
-                Err(err) => eprintln!("invalid reflex spec: {err}"),
-            }
+        "on" => {
+            let mut guard = field.lock().await;
+            guard.set_reflex_enabled(true);
+            println!("REFLEX enabled win_ms={}", guard.reflex_cfg().win_ms);
         }
-        "list" => {
-            let rules = {
-                let guard = field.lock().await;
-                guard.list_reflex()
-            };
-            match serde_json::to_string_pretty(&rules) {
+        "off" => {
+            let mut guard = field.lock().await;
+            guard.set_reflex_enabled(false);
+            println!("REFLEX disabled");
+        }
+        "status" => {
+            let guard = field.lock().await;
+            let cfg = guard.reflex_cfg();
+            let report = guard.reflex_last_report();
+            match serde_json::to_string_pretty(&serde_json::json!({
+                "cfg": cfg,
+                "enabled": guard.reflex_enabled(),
+                "last_report": report,
+            })) {
                 Ok(json) => println!("{}", json),
-                Err(err) => eprintln!("failed to render rules: {err}"),
+                Err(err) => eprintln!("failed to render status: {err}"),
             }
         }
-        "rm" => {
-            if rest.is_empty() {
-                eprintln!("usage: :reflex rm <id>");
+        "tune" => {
+            let args: Vec<&str> = parts.collect();
+            let mut guard = field.lock().await;
+            if let Err(err) = apply_reflex_tuning(&args, guard.reflex_cfg_mut()) {
+                eprintln!("invalid reflex tuning: {err}");
+                eprintln!(
+                    "usage: :reflex tune win=<ms> eps=<f32> step=<f32> hyster=<f32> cd=<ms> min_gain=<f32>"
+                );
                 return;
             }
-            match rest.parse::<u64>() {
-                Ok(id) => {
-                    let removed = {
-                        let mut guard = field.lock().await;
-                        guard.remove_reflex(id)
-                    };
-                    if removed {
-                        println!("REFLEX_REMOVED id={}", id);
-                    } else {
-                        eprintln!("no reflex with id={} found", id);
-                    }
-                }
-                Err(err) => eprintln!("invalid reflex id: {err}"),
-            }
+            println!(
+                "REFLEX tuned win={}ms eps={:.3} step={:.2}",
+                guard.reflex_cfg().win_ms,
+                guard.reflex_cfg().eps,
+                guard.reflex_cfg().pivot_step
+            );
         }
         other => {
             eprintln!("Unknown reflex command: {}", other);
         }
     }
+}
+
+fn apply_reflex_tuning(args: &[&str], cfg: &mut ReflexCfg) -> Result<(), String> {
+    for arg in args {
+        let mut split = arg.splitn(2, '=');
+        let key = split.next().unwrap_or("").trim();
+        let value = split
+            .next()
+            .ok_or_else(|| format!("missing value for {key}"))?
+            .trim();
+        match key {
+            "win" | "win_ms" => {
+                cfg.win_ms = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid win_ms: {err}"))?;
+            }
+            "eps" => {
+                cfg.eps = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid eps: {err}"))?;
+            }
+            "step" | "pivot_step" => {
+                cfg.pivot_step = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid pivot_step: {err}"))?;
+            }
+            "hyster" | "hysteresis" => {
+                cfg.hysteresis = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid hysteresis: {err}"))?;
+            }
+            "cd" | "cooldown" | "cooldown_ms" => {
+                cfg.cooldown_ms = value
+                    .parse::<u64>()
+                    .map_err(|err| format!("invalid cooldown: {err}"))?;
+            }
+            "min_gain" => {
+                cfg.min_gain = value
+                    .parse::<f32>()
+                    .map_err(|err| format!("invalid min_gain: {err}"))?;
+            }
+            other => {
+                return Err(format!("unknown tuning key: {other}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
@@ -848,6 +941,22 @@ async fn handle_trs_command(command: &str, field: &StdArc<Mutex<ClusterField>>) 
         }
         other => Err(anyhow!("unknown trs subcommand: {}", other)),
     }
+}
+
+async fn run_lql_query(field: &StdArc<Mutex<ClusterField>>, query: &str) -> Result<(), String> {
+    let ast = parse_lql(query).map_err(|err| err.to_string())?;
+    let outcome = {
+        let mut guard = field.lock().await;
+        guard.exec_lql(ast)
+    }
+    .map_err(|err| err.to_string())?;
+    if let Some(response) = outcome.response {
+        print_lql_response(&response);
+    }
+    for event in outcome.events {
+        print_event_line(&event);
+    }
+    Ok(())
 }
 
 async fn handle_mirror_command(command: &str, field: &StdArc<Mutex<ClusterField>>) -> Result<()> {
@@ -1236,21 +1345,6 @@ async fn handle_dream_command(command: &str, field: &StdArc<Mutex<ClusterField>>
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct ReflexAddRequest {
-    token: String,
-    kind: ImpulseKind,
-    min_strength: f32,
-    window_ms: u32,
-    min_count: u16,
-    then: ReflexAction,
-    #[serde(default = "default_enabled")]
-    enabled: bool,
-}
-fn default_enabled() -> bool {
-    true
-}
-
 #[derive(Debug, Deserialize, Default)]
 struct DreamConfigUpdate {
     #[serde(default)]
@@ -1590,6 +1684,157 @@ async fn handle_ws_command(command: &str, remote: &StdArc<Mutex<Option<WsHandle>
     Ok(())
 }
 
+async fn handle_peer_command(
+    command: &str,
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            println!("PEERS usage: :peers add <url> [credence] [ns <name>] | :peers list");
+        }
+        "add" => {
+            let url = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :peers add <url> [credence] [ns <name>]"))?;
+            let credence = parts
+                .next()
+                .and_then(|value| value.parse::<f32>().ok())
+                .map(|value| value.clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            let mut namespace: Option<String> = None;
+            let mut iter = parts.peekable();
+            while let Some(token) = iter.next() {
+                if token.eq_ignore_ascii_case("ns") {
+                    if let Some(value) = iter.next() {
+                        namespace = Some(value.to_string());
+                    }
+                }
+            }
+            let payload = json!({
+                "cmd": "peer.add",
+                "peer": {
+                    "url": url,
+                    "credence": credence,
+                    "ns": namespace,
+                }
+            });
+            send_remote_command(remote, payload).await?;
+            println!("PEERS add url={url} credence={credence:.2}");
+        }
+        "list" => {
+            let payload = json!({ "cmd": "peer.list" });
+            send_remote_command(remote, payload).await?;
+            println!("PEERS list requested");
+        }
+        other => {
+            return Err(anyhow!("unknown peers subcommand: {other}"));
+        }
+    }
+    Ok(())
+}
+
+async fn handle_noetic_command(
+    command: &str,
+    field: &StdArc<Mutex<ClusterField>>,
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+) -> Result<()> {
+    let mut parts = command.split_whitespace();
+    let sub = parts.next().unwrap_or("").trim();
+    match sub {
+        "" | "help" => {
+            println!(
+                "NOETIC usage: :noetic propose model | :noetic propose seed <id> | :noetic propose policy <json> | :noetic quorum <value>"
+            );
+        }
+        "propose" => {
+            let kind = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :noetic propose <model|seed|policy> ..."))?;
+            match kind {
+                "model" => {
+                    let snapshot = {
+                        let guard = field.lock().await;
+                        guard
+                            .resonant_model()
+                            .cloned()
+                            .unwrap_or_else(ResonantModel::default)
+                            .truncated(32)
+                    };
+                    let data = serde_json::to_value(snapshot)?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "model",
+                        "data": data,
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose model sent");
+                }
+                "seed" => {
+                    let seed_id = parts
+                        .next()
+                        .ok_or_else(|| anyhow!("usage: :noetic propose seed <seed_id>"))?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "seed",
+                        "data": {"id": seed_id},
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose seed id={seed_id}");
+                }
+                "policy" => {
+                    let raw = parts.collect::<Vec<_>>().join(" ");
+                    if raw.trim().is_empty() {
+                        return Err(anyhow!("usage: :noetic propose policy <json>"));
+                    }
+                    let value: JsonValue = serde_json::from_str(&raw)?;
+                    let payload = json!({
+                        "cmd": "noetic.propose",
+                        "obj": "policy",
+                        "data": value,
+                    });
+                    send_remote_command(remote, payload).await?;
+                    println!("NOETIC propose policy queued");
+                }
+                other => {
+                    return Err(anyhow!("unknown noetic object: {other}"));
+                }
+            }
+        }
+        "quorum" => {
+            let value_raw = parts
+                .next()
+                .ok_or_else(|| anyhow!("usage: :noetic quorum <0..1>"))?;
+            let q = value_raw
+                .parse::<f32>()
+                .map_err(|_| anyhow!("invalid quorum value"))?;
+            let q = q.clamp(0.0, 1.0);
+            let payload = json!({ "cmd": "noetic.quorum", "q": q });
+            send_remote_command(remote, payload).await?;
+            println!("NOETIC quorum set to {q:.2}");
+        }
+        other => {
+            return Err(anyhow!("unknown noetic subcommand: {other}"));
+        }
+    }
+    Ok(())
+}
+
+async fn send_remote_command(
+    remote: &StdArc<Mutex<Option<WsHandle>>>,
+    payload: JsonValue,
+) -> Result<()> {
+    let handle = {
+        let guard = remote.lock().await;
+        guard.clone()
+    };
+    let Some(handle) = handle else {
+        return Err(anyhow!("no nexus client connection"));
+    };
+    handle.send(payload).await
+}
+
 fn parse_impulse_json(data: &JsonValue) -> Result<Impulse> {
     let pattern = data
         .get("pattern")
@@ -1629,6 +1874,10 @@ fn print_event_line(raw: &str) {
                 "view" => format_view_event(&value),
                 "lql" => format_lql_event(&value),
                 "harmony" => format_harmony_event(&value),
+                "manifold" => format_manifold_event(&value),
+                "commit" => format_commit_event(&value),
+                "pivot" => format_pivot_event(&value),
+                "defuse" => format_defuse_event(&value),
                 _ => None,
             } {
                 println!("{}", line);
@@ -1742,6 +1991,122 @@ fn format_harmony_event(value: &JsonValue) -> Option<String> {
     ))
 }
 
+fn format_manifold_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    if let Some(intention) = meta.get("intention") {
+        let tokens = intention
+            .get("tokens")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let weights = intention
+            .get("weights")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let horizon = intention
+            .get("horizon_ms")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        let budget = intention
+            .get("budget")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "-".into());
+        return Some(format!(
+            "MANIFOLD INTEND tokens=[{}] weights=[{}] horizon_ms={} budget={}",
+            tokens, weights, horizon, budget
+        ));
+    }
+    if let Some(variants) = meta.get("variants") {
+        let limit = meta
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into());
+        let min_p = meta
+            .get("min_probability")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "-".into());
+        let top = variants
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                Some(format!(
+                    "{}(p={:.2},score={:.3})",
+                    item.get("id")?.as_str().unwrap_or(""),
+                    item.get("probability")?.as_f64()?,
+                    item.get("score")?.as_f64()?
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!(
+            "MANIFOLD VARIANTS limit={} min_p={} top=[{}]",
+            limit, min_p, top
+        ));
+    }
+    if let Some(slide) = meta.get("slide") {
+        let id = slide.get("id")?.as_str().unwrap_or("?");
+        let variants = slide
+            .get("variant_ids")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        return Some(format!("MANIFOLD SLIDE id={} variants=[{}]", id, variants));
+    }
+    None
+}
+
+fn format_commit_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let variant = meta.get("variant")?.as_str().unwrap_or("?");
+    let seeds = meta
+        .get("seeds")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_u64())
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "COMMIT variant={} seeds=[{}]",
+        variant,
+        if seeds.is_empty() { "-".into() } else { seeds }
+    ))
+}
+
+fn format_pivot_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let from = meta.get("from")?.as_str().unwrap_or("?");
+    let to = meta.get("to")?.as_str().unwrap_or("?");
+    let inertia = meta.get("inertia")?.as_f64().unwrap_or(0.0);
+    let reason = meta.get("reason").and_then(|v| v.as_str()).unwrap_or("-");
+    Some(format!(
+        "PIVOT from={} to={} inertia={:.3} reason={}",
+        from, to, inertia, reason
+    ))
+}
+
+fn format_defuse_event(value: &JsonValue) -> Option<String> {
+    let meta = value.get("meta")?;
+    let pendulum = meta.get("pendulum")?.as_str().unwrap_or("?");
+    let drain = meta.get("drain_rate")?.as_f64().unwrap_or(0.0);
+    Some(format!(
+        "DEFUSE pendulum={} drain_rate={:.3}",
+        pendulum, drain
+    ))
+}
+
 fn extract_stats_from_json(stats: &JsonValue) -> Option<(u32, f64, f64, String)> {
     let count = stats.get("count")?.as_u64()? as u32;
     let avg_strength = stats.get("avg_strength")?.as_f64()?;
@@ -1829,6 +2194,86 @@ fn print_lql_response(response: &LqlResponse) {
             println!(
                 "LQL UNSUBSCRIBE id={} removed={}",
                 result.id, result.removed
+            );
+        }
+        LqlResponse::Intend(result) => {
+            let tokens = result.tokens.join(",");
+            let weights = result
+                .weights
+                .iter()
+                .map(|w| format!("{w:.2}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let horizon = result
+                .horizon_ms
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            let budget = result
+                .budget
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "LQL INTEND tokens=[{}] weights=[{}] horizon_ms={} budget={}",
+                tokens, weights, horizon, budget
+            );
+        }
+        LqlResponse::Variants(result) => {
+            let summary = result
+                .variants
+                .iter()
+                .map(|v| format!("{}(p={:.2},score={:.3})", v.id, v.probability, v.score))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let limit = result
+                .limit
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            let min_p = result
+                .min_probability
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "-".into());
+            println!(
+                "LQL VARIANTS limit={} min_p={} top=[{}]",
+                limit, min_p, summary
+            );
+        }
+        LqlResponse::Slide(result) => {
+            let variants = result.variant_ids.join(",");
+            let goals = result
+                .desired_metrics
+                .iter()
+                .map(|(k, v)| format!("{}:{:.2}", k, v))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "LQL SLIDE id={} variants=[{}] goals={{ {} }}",
+                result.id, variants, goals
+            );
+        }
+        LqlResponse::Commit(result) => {
+            let seeds = if result.seeds.is_empty() {
+                "-".into()
+            } else {
+                result
+                    .seeds
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!("LQL COMMIT variant={} seeds=[{}]", result.variant_id, seeds);
+        }
+        LqlResponse::Pivot(result) => {
+            let reason = result.reason.clone().unwrap_or_else(|| "-".into());
+            println!(
+                "LQL PIVOT from={} to={} inertia={:.3} reason={}",
+                result.from, result.to, result.inertia, reason
+            );
+        }
+        LqlResponse::Defuse(result) => {
+            println!(
+                "LQL DEFUSE pendulum={} drain {} -> {}",
+                result.pendulum_id, result.previous_drain, result.new_drain
             );
         }
     }

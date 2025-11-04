@@ -14,6 +14,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: liminal-db
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +31,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: liminal-db
 
       - name: Cargo check (workspace)
         run: cargo check --workspace

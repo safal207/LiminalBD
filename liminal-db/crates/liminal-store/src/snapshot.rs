@@ -1,7 +1,7 @@
 use anyhow::Result;
 use liminal_core::{
     AwakeningConfig, CellSnapshot, ClusterField, DreamConfig, MirrorTimeline, NodeCell, ReflexRule,
-    ResonantModel, SeedParams, SyncConfig, SyncLog, TrsState,
+    ResonantModel, SeedGarden, SeedParams, SyncConfig, SyncLog, TrsState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,8 @@ struct SnapshotEnvelope {
     last_awaken_tick: u64,
     #[serde(default)]
     mirror: Option<MirrorTimeline>,
+    #[serde(default)]
+    seed_garden: SeedGarden,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,7 @@ pub struct ClusterFieldSeed {
     pub sync_log: SyncLog,
     pub last_awaken_tick: u64,
     pub mirror: MirrorTimeline,
+    pub seed_garden: SeedGarden,
 }
 
 impl ClusterFieldSeed {
@@ -90,6 +93,7 @@ impl ClusterFieldSeed {
         for epoch in mirror_epochs {
             field.push_mirror_epoch(epoch);
         }
+        field.seed_garden = self.seed_garden;
         field
     }
 }
@@ -120,6 +124,7 @@ pub fn create_snapshot(cluster: &ClusterField) -> Result<Vec<u8>> {
             &cluster.mirror_timeline(),
             MIRROR_SNAPSHOT_LIMIT,
         )),
+        seed_garden: cluster.seed_garden().clone(),
     };
     Ok(serde_cbor::to_vec(&envelope)?)
 }
@@ -140,6 +145,7 @@ pub fn load_snapshot(bytes: &[u8]) -> Result<ClusterFieldSeed> {
         sync_log: envelope.sync_log.unwrap_or_default(),
         last_awaken_tick: envelope.last_awaken_tick,
         mirror: envelope.mirror.unwrap_or_default(),
+        seed_garden: envelope.seed_garden,
     })
 }
 

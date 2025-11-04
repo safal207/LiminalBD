@@ -1,0 +1,262 @@
+{
+  "$id": "https://liminaldb.dev/schema/v1/commands.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LiminalDB Commands",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "command": {
+      "oneOf": [
+        { "$ref": "#/definitions/AuthCommand" },
+        { "$ref": "#/definitions/LqlCommand" },
+        { "$ref": "#/definitions/SubscribeCommand" },
+        { "$ref": "#/definitions/UnsubscribeCommand" },
+        { "$ref": "#/definitions/IntentTextCommand" },
+        { "$ref": "#/definitions/IntentInvokeCommand" },
+        { "$ref": "#/definitions/SeedPlantCommand" },
+        { "$ref": "#/definitions/SeedAbortCommand" },
+        { "$ref": "#/definitions/SeedGardenCommand" },
+        { "$ref": "#/definitions/DreamNowCommand" },
+        { "$ref": "#/definitions/SyncNowCommand" },
+        { "$ref": "#/definitions/AwakenNowCommand" },
+        { "$ref": "#/definitions/MirrorTimelineCommand" },
+        { "$ref": "#/definitions/MirrorReplayCommand" },
+        { "$ref": "#/definitions/NoeticProposeCommand" },
+        { "$ref": "#/definitions/NoeticPeersCommand" },
+        { "$ref": "#/definitions/SnapshotCommand" },
+        { "$ref": "#/definitions/PeerAddCommand" },
+        { "$ref": "#/definitions/PeerListCommand" },
+        { "$ref": "#/definitions/QuotaCommand" }
+      ]
+    }
+  },
+  "required": ["version", "command"],
+  "additionalProperties": false,
+  "definitions": {
+    "AuthCommand": {
+      "type": "object",
+      "title": "AuthCommand",
+      "properties": {
+        "op": { "const": "auth" },
+        "keyId": { "type": "string", "minLength": 1 },
+        "secret": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 }
+      },
+      "required": ["op", "keyId", "secret"],
+      "additionalProperties": false
+    },
+    "LqlCommand": {
+      "type": "object",
+      "title": "LqlCommand",
+      "properties": {
+        "op": { "const": "lql" },
+        "id": { "type": "string", "minLength": 1 },
+        "query": { "type": "string", "minLength": 1 },
+        "parameters": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["op", "id", "query"],
+      "additionalProperties": false
+    },
+    "SubscribeCommand": {
+      "type": "object",
+      "title": "SubscribeCommand",
+      "properties": {
+        "op": { "const": "subscribe" },
+        "id": { "type": "string", "minLength": 1 },
+        "pattern": { "type": "string", "minLength": 1 },
+        "options": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["live", "replay"] },
+            "cursor": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["op", "id", "pattern"],
+      "additionalProperties": false
+    },
+    "UnsubscribeCommand": {
+      "type": "object",
+      "title": "UnsubscribeCommand",
+      "properties": {
+        "op": { "const": "unsubscribe" },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["op", "id"],
+      "additionalProperties": false
+    },
+    "IntentTextCommand": {
+      "type": "object",
+      "title": "IntentTextCommand",
+      "properties": {
+        "op": { "const": "intent.text" },
+        "text": { "type": "string", "minLength": 1 },
+        "lang": { "type": "string", "default": "en" }
+      },
+      "required": ["op", "text"],
+      "additionalProperties": false
+    },
+    "IntentInvokeCommand": {
+      "type": "object",
+      "title": "IntentInvokeCommand",
+      "properties": {
+        "op": { "const": "intent" },
+        "kind": { "type": "string", "minLength": 1 },
+        "payload": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["op", "kind", "payload"],
+      "additionalProperties": false
+    },
+    "SeedPlantCommand": {
+      "type": "object",
+      "title": "SeedPlantCommand",
+      "properties": {
+        "op": { "const": "seed.plant" },
+        "id": { "type": "string", "minLength": 1 },
+        "spec": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["op", "id", "spec"],
+      "additionalProperties": false
+    },
+    "SeedAbortCommand": {
+      "type": "object",
+      "title": "SeedAbortCommand",
+      "properties": {
+        "op": { "const": "seed.abort" },
+        "id": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" }
+      },
+      "required": ["op", "id"],
+      "additionalProperties": false
+    },
+    "SeedGardenCommand": {
+      "type": "object",
+      "title": "SeedGardenCommand",
+      "properties": {
+        "op": { "const": "seed.garden" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "DreamNowCommand": {
+      "type": "object",
+      "title": "DreamNowCommand",
+      "properties": {
+        "op": { "const": "dream.now" },
+        "intensity": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "SyncNowCommand": {
+      "type": "object",
+      "title": "SyncNowCommand",
+      "properties": {
+        "op": { "const": "sync.now" },
+        "scope": { "type": "string", "enum": ["session", "global"] }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "AwakenNowCommand": {
+      "type": "object",
+      "title": "AwakenNowCommand",
+      "properties": {
+        "op": { "const": "awaken.now" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "MirrorTimelineCommand": {
+      "type": "object",
+      "title": "MirrorTimelineCommand",
+      "properties": {
+        "op": { "const": "mirror.timeline" },
+        "range": {
+          "type": "object",
+          "properties": {
+            "from": { "type": "string" },
+            "to": { "type": "string" }
+          },
+          "required": ["from", "to"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["op", "range"],
+      "additionalProperties": false
+    },
+    "MirrorReplayCommand": {
+      "type": "object",
+      "title": "MirrorReplayCommand",
+      "properties": {
+        "op": { "const": "mirror.replay" },
+        "cursor": { "type": "string" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "NoeticProposeCommand": {
+      "type": "object",
+      "title": "NoeticProposeCommand",
+      "properties": {
+        "op": { "const": "noetic.propose" },
+        "proposal": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["op", "proposal"],
+      "additionalProperties": false
+    },
+    "NoeticPeersCommand": {
+      "type": "object",
+      "title": "NoeticPeersCommand",
+      "properties": {
+        "op": { "const": "peers.list" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "SnapshotCommand": {
+      "type": "object",
+      "title": "SnapshotCommand",
+      "properties": {
+        "op": { "const": "snapshot" },
+        "scope": { "type": "string", "enum": ["session", "global"] }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "PeerAddCommand": {
+      "type": "object",
+      "title": "PeerAddCommand",
+      "properties": {
+        "op": { "const": "peers.add" },
+        "peer": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["op", "peer"],
+      "additionalProperties": false
+    },
+    "PeerListCommand": {
+      "type": "object",
+      "title": "PeerListCommand",
+      "properties": {
+        "op": { "const": "peers.list" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    },
+    "QuotaCommand": {
+      "type": "object",
+      "title": "QuotaCommand",
+      "properties": {
+        "op": { "const": "quota" },
+        "namespace": { "type": "string" }
+      },
+      "required": ["op"],
+      "additionalProperties": false
+    }
+  }
+}

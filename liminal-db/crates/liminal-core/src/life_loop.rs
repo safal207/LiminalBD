@@ -9,6 +9,7 @@ use crate::cluster_field::ClusterField;
 use crate::mirror::{record_epoch, EpochKind};
 use crate::morph_mind::{analyze, hints as gather_hints};
 use crate::recursion::{replay_epoch, ReplayConfig};
+use crate::reflex::ReflexSnapshot;
 use crate::resonant::build_model;
 use crate::synchrony::{detect_sync_groups, run_collective_dream};
 use crate::types::{Hint, Metrics};
@@ -111,6 +112,40 @@ pub async fn run_loop<F, G, H>(
                 on_hint(hint);
             }
             apply_hints(&mut *guard, &mut tick_ms, &advice);
+            if guard.reflex_enabled() {
+                let harmony = guard.symmetry_snapshot();
+                let snapshot = ReflexSnapshot {
+                    ts_ms: guard.now_ms,
+                    yield_rate: metrics.live_load,
+                    harmony: harmony.metrics.avg_strength,
+                    latency_p95: metrics.avg_latency_ms,
+                    impact: (metrics.active_pct - metrics.sleeping_pct).clamp(-1.0, 1.0),
+                };
+                if let Some(report) = guard.record_reflex_snapshot(snapshot) {
+                    let action = report
+                        .action
+                        .as_ref()
+                        .map(|a| format!("{:?}", a.kind()))
+                        .unwrap_or_else(|| "None".to_string());
+                    events.push(format!("REFLEX sig={:?} action={}", report.sig, action));
+                    events.push(
+                        json!({
+                            "ev": "reflex",
+                            "meta": {
+                                "sig": format!("{:?}", report.sig),
+                                "action": action,
+                                "delta": {
+                                    "yield": report.delta.yield_delta,
+                                    "harmony": report.delta.harmony_delta,
+                                    "latency": report.delta.latency_delta,
+                                    "impact": report.delta.impact_delta,
+                                }
+                            }
+                        })
+                        .to_string(),
+                    );
+                }
+            }
             on_metrics(&metrics);
             last_metrics = Some(metrics.clone());
             elapsed_since_metrics = 0;

@@ -84,6 +84,22 @@ pub enum ProtocolCommand {
         #[serde(rename = "cfg", skip_serializing_if = "Option::is_none")]
         cfg: Option<ReplayConfig>,
     },
+    #[serde(rename = "peer.add")]
+    PeerAdd { peer: PeerSpec },
+    #[serde(rename = "peer.list")]
+    PeerList,
+    #[serde(rename = "noetic.propose")]
+    NoeticPropose {
+        #[serde(rename = "obj")]
+        obj: NoeticObjectKind,
+        #[serde(rename = "data")]
+        data: JsonValue,
+    },
+    #[serde(rename = "noetic.quorum")]
+    NoeticQuorum {
+        #[serde(rename = "q")]
+        q: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +117,24 @@ pub struct IntrospectRequest {
     pub target: IntrospectTarget,
     #[serde(rename = "top", skip_serializing_if = "Option::is_none")]
     pub top: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PeerSpec {
+    #[serde(rename = "url")]
+    pub url: String,
+    #[serde(rename = "credence", default)]
+    pub credence: f32,
+    #[serde(rename = "ns", skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoeticObjectKind {
+    Model,
+    Seed,
+    Policy,
 }
 
 impl IntrospectRequest {

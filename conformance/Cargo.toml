@@ -1,0 +1,16 @@
+[package]
+name = "liminaldb-conformance"
+version = "1.0.0"
+edition = "2021"
+description = "Conformance harness for the LiminalDB protocol v1"
+authors = ["LiminalDB"]
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tracing = "0.1"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["clock"] }
