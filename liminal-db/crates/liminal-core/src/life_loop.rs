@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+use tracing::{debug, info};
 
 use crate::awakening::awaken;
 use crate::cluster_field::ClusterField;
@@ -102,6 +103,17 @@ pub async fn run_loop<F, G, H>(
             guard.trs.set_target(target);
             let trs_output = guard.trs.step(now_ms, observed);
             let new_tick = (tick_ms as i64 + trs_output.tick_adjust_ms as i64).clamp(80, 450);
+
+            debug!(
+                target: "liminal::trs",
+                observed_load = %observed,
+                target_load = %target,
+                tick_adjust_ms = %trs_output.tick_adjust_ms,
+                old_tick_ms = %tick_ms,
+                new_tick_ms = %new_tick,
+                "TRS adjustment"
+            );
+
             tick_ms = new_tick as u64;
             let trs_events = guard.apply_trs_output(now_ms, observed, &trs_output);
             for event in trs_events {
@@ -127,6 +139,17 @@ pub async fn run_loop<F, G, H>(
                         .as_ref()
                         .map(|a| format!("{:?}", a.kind()))
                         .unwrap_or_else(|| "None".to_string());
+
+                    info!(
+                        target: "liminal::reflex",
+                        signal = ?report.sig,
+                        action = %action,
+                        yield_delta = %report.delta.yield_delta,
+                        harmony_delta = %report.delta.harmony_delta,
+                        latency_delta = %report.delta.latency_delta,
+                        "Reflex action triggered"
+                    );
+
                     events.push(format!("REFLEX sig={:?} action={}", report.sig, action));
                     events.push(
                         json!({

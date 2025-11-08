@@ -34,11 +34,21 @@ use serde_json::{json, Value as JsonValue};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task;
-use tracing::info;
+use tracing::{debug, info, warn, error};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
+    // Initialize structured logging with env filter support
+    // Set RUST_LOG=liminal=debug,liminal::cluster=trace to see detailed logs
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("liminal=info"))
+        )
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_line_number(true)
+        .init();
     let mut args = std::env::args().skip(1);
     let mut pipe_cbor = false;
     let mut store_uri: Option<String> = None;
