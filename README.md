@@ -1,37 +1,48 @@
 # LiminalDB
 
-**LiminalDB** — это база данных нового типа: реактивная, адаптивная и объяснимая.
+LiminalDB is a next-generation database: **reactive, adaptive, and explainable**.
 
-LiminalDB is a new kind of database: reactive, adaptive, and explainable.
+LiminalDB — база данных нового поколения: **реактивная, адаптивная и объяснимая**.
 
-## Что это / What it is
+## Why LiminalDB
 
-LiminalDB сохраняет знакомую идею «базы данных» как точки хранения и доступа к состоянию,
-но добавляет следующий слой: система реагирует на поток импульсов, подстраивает поведение
-в реальном времени и делает внутренние изменения наблюдаемыми через события и метрики.
+Most databases focus on storing and retrieving state. LiminalDB keeps this foundation and adds runtime adaptation:
 
-LiminalDB keeps the familiar concept of a “database” as a place to store and access state,
-but adds a new layer: it reacts to impulse streams, adapts behavior in real time,
-and exposes internal changes through events and metrics.
+- **Storage**: persist impulses, events, and state snapshots.
+- **Adaptation**: tune behavior under changing signal/load patterns.
+- **Explainability**: expose decisions through metrics, events, and replay.
 
-## Три базовых обещания / Three core promises
+Большинство БД фокусируются на хранении и чтении состояния. LiminalDB сохраняет эту основу и добавляет адаптацию во время выполнения:
 
-1. **Хранение / Storage** — надежная фиксация состояния, событий и снимков.
-2. **Адаптация / Adaptation** — динамическая настройка поведения под поток нагрузки и сигналов.
-3. **Объяснимость / Explainability** — прозрачные метрики, события и replay для понимания причин.
+- **Хранение**: фиксация импульсов, событий и снимков состояния.
+- **Адаптация**: подстройка поведения под изменяющиеся сигналы и нагрузку.
+- **Объяснимость**: прозрачность решений через метрики, события и replay.
 
-## Для кого / Who it is for
+## 5-minute quickstart
 
-- Команды, строящие event-driven системы.
-- AI/agent runtime-инфраструктуры, где важны контекст и управляемая эволюция состояния.
-- Инженеры, которым нужна не только запись данных, но и управляемая реактивность.
+```bash
+cd liminal-db
+cargo run -p liminal-cli
+```
 
-- Teams building event-driven systems.
-- AI/agent runtime infrastructure where context and controlled state evolution matter.
-- Engineers who need not just data persistence, but governed reactivity.
+Then send a few impulses in CLI:
 
-## Дальше / Next
+```text
+a cpu/load 0.9
+q color/red 0.7
+w memory/seed 0.5
+```
 
-Подробная документация и примеры находятся в каталоге [`liminal-db/`](./liminal-db/).
+You should see periodic metrics and hints as the field reacts.
 
-Detailed docs and examples are available in [`liminal-db/`](./liminal-db/).
+## Repository map
+
+- `liminal-db/` — core crates, CLI, bridges, storage, docs.
+- `protocol/` — protocol schemas and codegen.
+- `examples/` — integration examples.
+
+## Next reading
+
+- Core usage and build commands: [`liminal-db/README.md`](./liminal-db/README.md)
+- Protocol reference: [`docs/PROTOCOL.md`](./docs/PROTOCOL.md)
+- Architecture and roadmap: [`docs/ARCHITECTURE_ANALYSIS.md`](./docs/ARCHITECTURE_ANALYSIS.md), [`docs/STRATEGIC_ROADMAP_2025.md`](./docs/STRATEGIC_ROADMAP_2025.md)

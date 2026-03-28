@@ -1,28 +1,26 @@
 # LiminalDB v0.2
 
-LiminalDB — база данных нового типа: реактивная, адаптивная и объяснимая.
+LiminalDB is a next-generation database: reactive, adaptive, and explainable.
 
-LiminalDB is a new kind of database: reactive, adaptive, and explainable.
+LiminalDB — база данных нового поколения: реактивная, адаптивная и объяснимая.
 
-Минимальное живое ядро LiminalDB без внешних зависимостей. Проект состоит из нескольких крейтов:
+## Workspace crates
 
-- `liminal-core` — ядро эволюции клеток и цикл жизни.
-- `liminal-sensor` — хостовые сенсоры/импульсы.
-- `liminal-cli` — интерактивный CLI и CBOR-пайп.
-- `liminal-bridge-abi` — универсальный мост (C ABI, WASM и CBOR-протокол).
+- `liminal-core` — cell evolution engine and life loop.
+- `liminal-sensor` — host sensors and impulse ingestion.
+- `liminal-cli` — interactive CLI and CBOR pipe mode.
+- `liminal-bridge-abi` — universal bridge (C ABI, WASM, CBOR protocol).
 
-## Установка
+## Requirements
 
-1. Установите [Rust](https://www.rust-lang.org/tools/install) (Rustup) версии 1.79 или новее.
-2. Клонируйте репозиторий и перейдите в каталог `liminal-db/`.
+1. Install [Rust](https://www.rust-lang.org/tools/install) (Rustup), version `1.79+`.
+2. Open this directory:
 
 ```bash
 cd liminal-db
 ```
 
-## Проверка сборки
-
-Для сборки и тестов используйте команды:
+## Build and test
 
 ```bash
 cargo build --workspace
@@ -30,21 +28,17 @@ cargo test -p liminal-bridge-abi
 cargo run -p liminal-cli -- --pipe-cbor
 ```
 
-Последняя команда запускает CLI в режиме CBOR-пайпа. После старта можно вводить hex-строки импульсов, каждая строка — отдельный CBOR-пакет. Ответы печатаются в stdout как hex-представление событий/метрик.
+The CBOR mode reads one hex-encoded packet per line from stdin and prints event/metrics responses as hex to stdout.
 
-## Запуск CLI (человекочитаемый режим)
-
-Стандартный CLI запускается как и раньше:
+## Interactive CLI
 
 ```bash
 cargo run -p liminal-cli
 ```
 
-После старта раз в секунду будут печататься метрики и подсказки (`HINTS`).
+After startup, metrics and hints are printed periodically.
 
-### Примеры команд
-
-В отдельном терминале или в том же процессе введите команды:
+Example impulses:
 
 ```text
 a cpu/load 0.9
@@ -52,12 +46,12 @@ q color/red 0.7
 w memory/seed 0.5
 ```
 
-* `q` — запрос (`Query`)
-* `w` — запись (`Write`)
-* `a` — воздействие (`Affect`)
+- `q` — Query
+- `w` — Write
+- `a` — Affect
 
-Паттерны индексируются по простым токенам; клетки реагируют на импульсы, иногда делятся и засыпают.
+Patterns are tokenized; matching cells react, may divide, and may transition to sleep.
 
-Остановить приложение можно сочетанием `Ctrl+C`.
+Stop with `Ctrl+C`.
 
 [![LiminalDB CI](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml/badge.svg)](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml)
