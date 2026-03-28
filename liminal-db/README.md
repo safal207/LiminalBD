@@ -1,5 +1,9 @@
 # LiminalDB v0.2
 
+LiminalDB — база данных нового типа: реактивная, адаптивная и объяснимая.
+
+LiminalDB is a new kind of database: reactive, adaptive, and explainable.
+
 Минимальное живое ядро LiminalDB без внешних зависимостей. Проект состоит из нескольких крейтов:
 
 - `liminal-core` — ядро эволюции клеток и цикл жизни.
