@@ -43,6 +43,8 @@ You should see periodic metrics and hints as the field reacts.
 
 ## Next reading
 
+- Positioning v1: [`docs/POSITIONING_V1.md`](./docs/POSITIONING_V1.md)
+- 5-minute walkthrough: [`docs/QUICKSTART_5_MIN.md`](./docs/QUICKSTART_5_MIN.md)
 - Core usage and build commands: [`liminal-db/README.md`](./liminal-db/README.md)
 - Protocol reference: [`docs/PROTOCOL.md`](./docs/PROTOCOL.md)
 - Architecture and roadmap: [`docs/ARCHITECTURE_ANALYSIS.md`](./docs/ARCHITECTURE_ANALYSIS.md), [`docs/STRATEGIC_ROADMAP_2025.md`](./docs/STRATEGIC_ROADMAP_2025.md)

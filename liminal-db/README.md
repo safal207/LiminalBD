@@ -55,3 +55,8 @@ Patterns are tokenized; matching cells react, may divide, and may transition to 
 Stop with `Ctrl+C`.
 
 [![LiminalDB CI](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml/badge.svg)](https://github.com/safal207/LiminalBD/actions/workflows/ci.yml)
+
+## Learn more
+
+- Repository quickstart: [`../docs/QUICKSTART_5_MIN.md`](../docs/QUICKSTART_5_MIN.md)
+- Protocol reference: [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md)
