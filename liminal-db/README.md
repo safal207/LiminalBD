@@ -61,4 +61,5 @@ Stop with `Ctrl+C`.
 - Repository quickstart: [`../docs/QUICKSTART_5_MIN.md`](../docs/QUICKSTART_5_MIN.md)
 - North Star scenario: [`../docs/USE_CASE_NORTH_STAR.md`](../docs/USE_CASE_NORTH_STAR.md)
 - Protocol reference: [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md)
+- Explainability contract: [`../docs/EXPLAINABILITY_EVENT_CONTRACT.md`](../docs/EXPLAINABILITY_EVENT_CONTRACT.md)
 - Metrics glossary: [`../docs/METRICS_GLOSSARY.md`](../docs/METRICS_GLOSSARY.md)

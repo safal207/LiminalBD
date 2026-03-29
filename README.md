@@ -49,5 +49,6 @@ You should see periodic metrics and hints as the field reacts.
 - Execution backlog (P0/P1/P2): [`docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md`](./docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md)
 - Core usage and build commands: [`liminal-db/README.md`](./liminal-db/README.md)
 - Protocol reference: [`docs/PROTOCOL.md`](./docs/PROTOCOL.md)
+- Explainability event contract: [`docs/EXPLAINABILITY_EVENT_CONTRACT.md`](./docs/EXPLAINABILITY_EVENT_CONTRACT.md)
 - Metrics glossary: [`docs/METRICS_GLOSSARY.md`](./docs/METRICS_GLOSSARY.md)
 - Architecture and roadmap: [`docs/ARCHITECTURE_ANALYSIS.md`](./docs/ARCHITECTURE_ANALYSIS.md), [`docs/STRATEGIC_ROADMAP_2025.md`](./docs/STRATEGIC_ROADMAP_2025.md)
