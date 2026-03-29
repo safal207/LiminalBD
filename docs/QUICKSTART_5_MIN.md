@@ -72,6 +72,7 @@ In this mode, stdin expects one hex-encoded CBOR packet per line and stdout prin
 ## 7) Next steps
 
 - North Star scenario: `docs/USE_CASE_NORTH_STAR.md`
+- Metrics glossary: `docs/METRICS_GLOSSARY.md`
 - Protocol details: `docs/PROTOCOL.md`
 - Architecture analysis: `docs/ARCHITECTURE_ANALYSIS.md`
 - Roadmap: `docs/STRATEGIC_ROADMAP_2025.md`
