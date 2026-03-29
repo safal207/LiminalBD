@@ -33,7 +33,34 @@ Look for:
 - hints printed by the loop,
 - evidence that cells react and lifecycle transitions occur.
 
-## 4) Optional: CBOR pipe mode
+## 4) Pass/fail checkpoint (v1)
+
+Pass if within ~30 seconds you observe both:
+
+1. at least one metrics/hints update after sending impulses,
+2. at least one visible change in system state indicators (e.g., activity/load/hints evolution).
+
+If neither appears, treat quickstart as failed and run troubleshooting below.
+
+## 5) Troubleshooting
+
+- Ensure you are inside `liminal-db/` before running CLI.
+- Ensure Rust toolchain is installed (`rustc --version`, `cargo --version`).
+- If build fails, run:
+
+```bash
+cargo build --workspace
+```
+
+- If no reactions after inputs, retry with stronger affect impulses:
+
+```text
+a service/auth/error 1.0
+a service/auth/error 1.0
+a service/auth/error 1.0
+```
+
+## 6) Optional: CBOR pipe mode
 
 ```bash
 cd liminal-db
@@ -42,8 +69,9 @@ cargo run -p liminal-cli -- --pipe-cbor
 
 In this mode, stdin expects one hex-encoded CBOR packet per line and stdout prints hex-encoded responses.
 
-## 5) Next steps
+## 7) Next steps
 
+- North Star scenario: `docs/USE_CASE_NORTH_STAR.md`
 - Protocol details: `docs/PROTOCOL.md`
 - Architecture analysis: `docs/ARCHITECTURE_ANALYSIS.md`
 - Roadmap: `docs/STRATEGIC_ROADMAP_2025.md`

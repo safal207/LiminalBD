@@ -45,6 +45,7 @@ You should see periodic metrics and hints as the field reacts.
 
 - Positioning v1: [`docs/POSITIONING_V1.md`](./docs/POSITIONING_V1.md)
 - 5-minute walkthrough: [`docs/QUICKSTART_5_MIN.md`](./docs/QUICKSTART_5_MIN.md)
+- North Star use-case: [`docs/USE_CASE_NORTH_STAR.md`](./docs/USE_CASE_NORTH_STAR.md)
 - Execution backlog (P0/P1/P2): [`docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md`](./docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md)
 - Core usage and build commands: [`liminal-db/README.md`](./liminal-db/README.md)
 - Protocol reference: [`docs/PROTOCOL.md`](./docs/PROTOCOL.md)

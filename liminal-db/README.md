@@ -59,4 +59,5 @@ Stop with `Ctrl+C`.
 ## Learn more
 
 - Repository quickstart: [`../docs/QUICKSTART_5_MIN.md`](../docs/QUICKSTART_5_MIN.md)
+- North Star scenario: [`../docs/USE_CASE_NORTH_STAR.md`](../docs/USE_CASE_NORTH_STAR.md)
 - Protocol reference: [`../docs/PROTOCOL.md`](../docs/PROTOCOL.md)
