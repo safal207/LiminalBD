@@ -152,24 +152,13 @@ sdk/python/
 
 ### 6. **Implement Roadmap Items**
 
-Check [docs/STRATEGIC_ROADMAP_2025.md](docs/STRATEGIC_ROADMAP_2025.md) for planned work:
+Check [docs/STRATEGIC_ROADMAP_2025.md](docs/STRATEGIC_ROADMAP_2025.md) for the
+full prioritised backlog. Current focus areas:
 
-**Q1 2025 (Now!):**
-- [ ] Refactor cluster_field.rs into modules
-- [ ] Type-safe IDs (NodeId, EpochId, etc.)
-- [ ] Custom error types (thiserror)
-- [ ] Structured logging (tracing)
-
-**Q2 2025:**
-- [ ] OpenTelemetry integration
-- [ ] Decision logging
-- [ ] Metrics dashboard (Grafana)
-- [ ] Replay debugger
-
-**Q3 2025:**
-- [ ] Multi-node cluster
-- [ ] Raft consensus
-- [ ] Horizontal auto-scaling
+- **Architecture:** Refactor `cluster_field.rs` into bounded contexts
+- **Type safety:** Newtype IDs (`NodeId`, `EpochId`, `SeedId`)
+- **Observability:** OpenTelemetry tracing, decision logging, Grafana dashboards
+- **Distribution:** Multi-node cluster, Raft consensus, horizontal auto-scaling
 
 ## Development Setup
 
@@ -287,19 +276,21 @@ cargo test -p liminal-core my_new_feature
 ### What Makes a Good PR?
 
 ✅ **Good:**
-- Single concern (one feature or bug fix)
-- Minimal changes (easier to review)
-- Clear commit history (good rebase structure)
-- Tests for new behavior
-- Documentation updates
-- Performance benchmarks for perf changes
+- Focused scope — one area of concern per PR where possible
+- Clear commit history (logical, reviewable units)
+- Tests for new behaviour
+- Documentation updated to match
+- Performance benchmarks included for performance-affecting changes
 
 ❌ **Avoid:**
-- Mixing refactoring with new features
-- Hundreds of lines of changes
-- "Fix typo" hidden in large PR
-- No tests
-- No explanation of why
+- Mixing unrelated features in a single PR (e.g. new feature + unrelated refactor)
+- Burying a breaking change in a large diff without calling it out
+- No explanation of *why* in the PR description
+
+> **Note:** Some PRs are necessarily broad — for example, a documentation
+> foundation PR or a licence change touches many files by nature.
+> In those cases, a clear PR description that explains the unified purpose
+> is more important than minimising file count.
 
 ## Areas We Need Help
 
