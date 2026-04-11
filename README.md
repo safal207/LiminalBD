@@ -76,14 +76,24 @@ for event in field.drain_events() {
 
 > The TypeScript SDK wraps the WebSocket protocol defined in
 > [docs/PROTOCOL.md](docs/PROTOCOL.md).
+> Source: `sdk/ts/src/client.ts`
 
 ```typescript
-import { LiminalClient } from './sdk/ts/src';
+import { LiminalClient } from './sdk/ts/src/index';
 
 const client = new LiminalClient('ws://localhost:8787');
 
-client.on('harmony', (m) => console.log('load:', m.live_load));
-client.send({ cmd: 'impulse', pattern: 'cpu/load', strength: 0.8 });
+// Subscribe to harmony events
+client.on('harmony', (msg) => {
+  console.log('live_load:', msg.meta?.live_load);
+});
+
+// Send an impulse via the protocol
+client.send(JSON.stringify({
+  cmd: 'impulse',
+  pattern: 'cpu/load',
+  strength: 0.8,
+}));
 ```
 
 ## Project Status
