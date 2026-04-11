@@ -56,10 +56,14 @@ git push origin docs/improve-pattern-matching
 
 ### 3. **Write Tests**
 
-Help us achieve 80%+ test coverage:
+Help us achieve 80%+ test coverage.
+
+> **Illustrative examples** — the snippets below show the intended testing
+> patterns. Some API signatures may evolve as the codebase matures.
+> Run `cargo test --all` to see the current passing test suite.
 
 ```rust
-// liminal-core/src/tests/
+// liminal-core/src/tests/ — illustrative patterns
 
 #[test]
 fn test_cell_division_at_energy_threshold() {
@@ -152,7 +156,7 @@ sdk/python/
 
 ### 6. **Implement Roadmap Items**
 
-Check [docs/STRATEGIC_ROADMAP_2025.md](docs/STRATEGIC_ROADMAP_2025.md) for the
+Check [docs/ROADMAP.md](docs/ROADMAP.md) for the
 full prioritised backlog. Current focus areas:
 
 - **Architecture:** Refactor `cluster_field.rs` into bounded contexts

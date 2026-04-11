@@ -98,7 +98,7 @@ client.send(JSON.stringify({
 
 ## Project Status
 
-**Version:** 0.2–0.5 (active development)
+**Version:** pre-1.0 / 0.5 (active development)
 
 | Area | Status |
 |------|--------|
@@ -144,7 +144,7 @@ detailed IoT scenario with modelled comparisons vs Redis Streams and Kafka.
 |----------|---------|
 | [docs/ARCHITECTURE_ANALYSIS.md](docs/ARCHITECTURE_ANALYSIS.md) | Design decisions, module breakdown |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Client-server wire format |
-| [docs/STRATEGIC_ROADMAP_2025.md](docs/STRATEGIC_ROADMAP_2025.md) | Quarterly plan |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap |
 | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) | Intellectual and philosophical roots |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
