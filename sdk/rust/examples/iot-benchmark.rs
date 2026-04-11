@@ -189,7 +189,7 @@ fn print_comparison(results: &[ModelledResult]) {
     println!("MODELLED COMPARISON — LiminalDB vs Redis Streams vs Kafka");
     println!("NOTE: LiminalDB figures are modelled; Redis/Kafka figures are from");
     println!("      public benchmarks at similar hardware/throughput levels.");
-    println!("      Independent real-world validation is planned for Q2 2025.");
+    println!("      Independent real-world validation is not yet available.");
     println!("{}", "═".repeat(100));
 
     // Latency

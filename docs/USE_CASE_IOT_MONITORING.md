@@ -10,8 +10,8 @@
 > | *[modelled]* | Derived from architectural analysis; not measured on live hardware |
 > | *[illustrative]* | Order-of-magnitude estimate for planning; your numbers will differ |
 >
-> Real end-to-end benchmarks against a running LiminalDB instance are **planned
-> for Q2 2025**. Contributions welcome — see [CONTRIBUTING.md](../CONTRIBUTING.md).
+> Real end-to-end benchmarks against a running LiminalDB instance are **not yet
+> available**. Contributions welcome — see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ---
 
@@ -264,10 +264,10 @@ The specific savings depend entirely on your existing stack and team structure.
 | WebSocket bridge | ✅ implemented | `liminal-bridge-net` |
 | CLI interface | ✅ implemented | `liminal-cli` |
 | WASM / FFI bridges | ✅ implemented | `liminal-bridge-abi` |
-| Real performance benchmarks | 🚧 in progress | Q2 2025 target |
-| Distributed cluster / Raft | 🚧 in progress | Q3 2025 target |
-| Horizontal auto-scaling | 📋 planned | Q3 2025 roadmap |
-| Security audit | 🚧 in progress | Q4 2025 target |
+| Real performance benchmarks | 🚧 in progress | See roadmap |
+| Distributed cluster / Raft | 🚧 in progress | See roadmap |
+| Horizontal auto-scaling | 📋 planned | See roadmap |
+| Security audit | 🚧 in progress | See roadmap |
 
 ---
 
