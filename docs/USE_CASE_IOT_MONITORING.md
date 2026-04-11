@@ -1,5 +1,15 @@
 # Use Case: Adaptive IoT Monitoring Pipeline
 
+> **Disclaimer — Modelled estimates, not measured results.**
+> The performance figures in the "Benchmark Results" and "Cost Comparison"
+> sections are derived from architectural analysis and control-theory
+> projections, not from running LiminalDB against a live Redis or Kafka cluster.
+> Redis and Kafka reference numbers come from their respective public
+> benchmarks at similar hardware / throughput levels.
+> Real end-to-end validation is planned for Q2 2025 — contributions welcome.
+
+---
+
 ## Problem Statement
 
 Traditional IoT monitoring systems face critical challenges:
@@ -77,7 +87,15 @@ IoT Devices → MQTT/HTTP → LiminalDB → Alerts/Dashboards
    }
    ```
 
-## Benchmark Results
+## Benchmark Results (Modelled)
+
+> All LiminalDB figures below are **modelled estimates** based on:
+> - Architectural analysis of the routing and cell-management subsystems
+> - PID control-theory projections for adaptive load scenarios
+> - Redis / Kafka figures sourced from public benchmarks (similar hardware)
+>
+> Independent real-world benchmarks are planned. See `examples/iot-benchmark.rs`
+> to run the synthetic model locally.
 
 ### Test Setup
 
@@ -169,7 +187,10 @@ Example: System under spike load (S3)
 
 **Value:** Operators can see exactly why system made decisions → build trust
 
-## Cost Comparison
+## Cost Comparison (Illustrative)
+
+> Cost figures are **illustrative estimates** based on typical cloud pricing
+> and industry operational benchmarks. Your numbers will vary.
 
 **Setup:** 1 year, 365 days, 24/7 operation, 100K-1M sensors
 
