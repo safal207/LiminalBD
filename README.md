@@ -98,7 +98,7 @@ client.send(JSON.stringify({
 
 ## Project Status
 
-**Version:** pre-1.0 / 0.5 (active development)
+**Version:** 0.5.x (pre-1.0, active development)
 
 | Area | Status |
 |------|--------|

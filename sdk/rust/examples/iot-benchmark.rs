@@ -11,7 +11,7 @@
 //!   # then stream events via WebSocket and measure with :status
 //!
 //! Usage (synthetic model):
-//!   cargo run --example iot-benchmark --release
+//!   cargo run -p liminaldb-client --example iot-benchmark --release
 
 use std::time::Instant;
 

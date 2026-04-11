@@ -284,22 +284,16 @@ publicly available benchmarks. Listed here for transparency and so reviewers
 can verify independently:
 
 1. **Redis Streams throughput & latency**
-   — Redis benchmark documentation:
-   https://redis.io/docs/management/optimization/benchmarks/
-   — "Redis Streams vs Kafka" community benchmark (2023):
-   https://redis.com/blog/redis-streams-vs-apache-kafka/
+   - [Redis benchmark documentation](https://redis.io/docs/management/optimization/benchmarks/)
+   - [Redis Streams vs Kafka — Redis blog (2023)](https://redis.com/blog/redis-streams-vs-apache-kafka/)
 
 2. **Kafka throughput characteristics**
-   — Confluent benchmark post "Kafka Performance" (2021):
-   https://www.confluent.io/blog/kafka-fastest-messaging-system/
-   — Apache Kafka documentation on performance:
-   https://kafka.apache.org/documentation/#design
+   - [Kafka Performance — Confluent blog (2021)](https://www.confluent.io/blog/kafka-fastest-messaging-system/)
+   - [Apache Kafka design documentation](https://kafka.apache.org/documentation/#design)
 
 3. **Memory overhead reference points**
-   — Redis memory usage guide:
-   https://redis.io/docs/management/optimization/memory-optimization/
-   — Kafka JVM heap and off-heap usage:
-   https://kafka.apache.org/documentation/#brokerconfigs
+   - [Redis memory optimisation guide](https://redis.io/docs/management/optimization/memory-optimization/)
+   - [Kafka broker configuration (heap & off-heap)](https://kafka.apache.org/documentation/#brokerconfigs)
 
 > Note: Benchmark conditions vary by version, hardware, configuration, and
 > workload shape. The numbers used here are approximate reference points for
