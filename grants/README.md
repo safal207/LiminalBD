@@ -1,36 +1,26 @@
-# LiminalBD Grant Readiness
+# Grant Materials for LiminalBD
 
-## Positioning
+This directory contains NLnet-facing grant material for `LiminalBD` as part of
+the broader Liminal Stack submission to `NGI Zero Commons Fund`.
 
-LiminalBD is the storage and evidence layer of the Liminal Stack: a reactive,
-audit-friendly database with mirror timeline replay, protocol surfaces, and SDK
-access paths.
+## Files
 
-## Why it fits NGI Zero Commons Fund
+- `NLNET_COMMONS_APPLICATION.md` - stack-wide application draft shared across
+  `DAO_lim`, `LiminalBD`, and `GardenLiminal`
+- `NLNET_COMMONS_REPO_BRIEF.md` - LiminalBD-specific positioning, scope, and
+  submission notes
 
-- infrastructure component with reuse across downstream applications
-- emphasis on auditability and replay rather than closed platform lock-in
-- protocol and SDK surfaces already present in the repository
-- useful independently or as part of the larger stack
+## Current call
 
-## Grant-facing strengths visible in the repository
+`NGI Zero Entrust` is closed. The active funding track is
+`NGI Zero Commons Fund`, with the next deadline set to `June 1, 2026, 12:00
+CEST`.
 
-- protocol documentation under [docs/protocol.md](../docs/protocol.md)
-- SDK structure under [sdk](../sdk)
-- bridge and interoperability work across protocol and runtime layers
-- existing [GRANT_BRIEF.md](../GRANT_BRIEF.md)
+## LiminalBD role in the stack
 
-## Licensing status
+LiminalBD is the storage and evidence layer of the Liminal Stack:
 
-The repository root license is now aligned with the open-source grant story.
-
-- The root [LICENSE](../LICENSE) is `Apache-2.0`.
-- Existing subpackages that declare `Apache-2.0` are now directionally
-  consistent with the repository root.
-
-## Recommended next fixes before submission
-
-- add an explicit root-level note in the README that the repository is licensed
-  under `Apache-2.0`
-- do one pass over all subpackages to confirm no stale proprietary wording
-  remains in docs
+- adaptive reactive database with replayable history
+- append-only mirror timeline for auditability
+- protocol and SDK surfaces for interoperability
+- Apache-2.0 licensed Rust workspace
