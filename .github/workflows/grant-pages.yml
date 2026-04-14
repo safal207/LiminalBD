@@ -5,6 +5,8 @@ on:
     branches:
       - main
     paths:
+      - docs/index.html
+      - docs/grants/nlnet-commons.html
       - docs/grant-landing.html
       - .github/workflows/grant-pages.yml
   workflow_dispatch:
@@ -35,8 +37,9 @@ jobs:
 
       - name: Build static page
         run: |
-          mkdir -p _site
-          cp docs/grant-landing.html _site/index.html
+          mkdir -p _site/grants
+          cp docs/index.html _site/index.html
+          cp docs/grants/nlnet-commons.html _site/grants/nlnet-commons.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
