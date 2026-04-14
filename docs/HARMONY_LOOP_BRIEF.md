@@ -13,7 +13,7 @@
   - morph_mind.rs (правки)
   - life_loop.rs (правки)
 - liminal-cli (команды)
-- docs/PROTOCOL.md (обновить секцию конфигурации)
+- docs/protocol.md (обновить секцию конфигурации)
 
 1) TRS: состояние и контроль (trs.rs)
 - struct TrsState {
@@ -70,7 +70,7 @@
 - В liminal-bridge-abi push() добавить CBOR-команду:
   {"cmd":"trs_set","cfg":{"alpha":..,"beta":..,"k_p":..,"k_i":..,"k_d":..,"target_load":..}}
   {"cmd":"trs_target","value":0.62}
-- PROTOCOL.md: описать эти команды и события trs_trace/harmony.
+- protocol.md: описать эти команды и события trs_trace/harmony.
 
 6) Сохранение состояния
 - В snapshot включить TrsState (alpha,beta,k*,target_load).

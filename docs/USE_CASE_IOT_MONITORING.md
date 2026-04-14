@@ -193,7 +193,7 @@ Unlike Redis Streams or Kafka, every adaptive decision is logged with rationale:
 | Redis + custom pipeline | $48 K | $130 K | $20 K | **~$198 K** |
 | Kafka + aggregators | $65 K | $150 K | $30 K | **~$245 K** |
 | Prometheus + Alertmanager | $35 K | $70 K | $15 K | **~$120 K** |
-| **LiminalDB (MIT, single system)** | **$12 K** | **$20 K** | **$5 K** | **~$37 K** |
+| **LiminalDB (Apache-2.0, single system)** | **$12 K** | **$20 K** | **$5 K** | **~$37 K** |
 
 Primary saving: one system instead of five reduces on-call surface, debugging
 time, and cross-tool coordination overhead.
@@ -223,7 +223,7 @@ Send sensor data via the **WebSocket interface** (port 8787) or the **CLI**:
 ```
 
 WebSocket clients use the binary/JSON protocol defined in
-[docs/PROTOCOL.md](PROTOCOL.md). See `sdk/ts/src/client.ts` for a working
+[docs/protocol.md](protocol.md). See `sdk/ts/src/client.ts` for a working
 TypeScript example.
 
 > **Note:** There is no built-in HTTP REST endpoint at this time.

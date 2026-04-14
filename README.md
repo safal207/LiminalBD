@@ -75,7 +75,7 @@ for event in field.drain_events() {
 ### TypeScript SDK (WebSocket)
 
 > The TypeScript SDK wraps the WebSocket protocol defined in
-> [docs/PROTOCOL.md](docs/PROTOCOL.md).
+> [docs/protocol.md](docs/protocol.md).
 > Source: `sdk/ts/src/client.ts`
 
 ```typescript
@@ -143,7 +143,7 @@ detailed IoT scenario with modelled comparisons vs Redis Streams and Kafka.
 | Document | Content |
 |----------|---------|
 | [docs/ARCHITECTURE_ANALYSIS.md](docs/ARCHITECTURE_ANALYSIS.md) | Design decisions, module breakdown |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | Client-server wire format |
+| [docs/protocol.md](docs/protocol.md) | Client-server wire format |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap |
 | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) | Intellectual and philosophical roots |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
@@ -157,7 +157,7 @@ good first issues.
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+[Apache-2.0](LICENSE) — free to use, modify, and distribute.
 
 ## Contact
 
