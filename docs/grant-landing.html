@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LiminalDB - Grant Landing</title>
+  <style>
+    :root {
+      --bg: #f3f0e7;
+      --panel: rgba(255, 252, 246, 0.88);
+      --ink: #1a1d1b;
+      --muted: #55615a;
+      --line: rgba(26, 29, 27, 0.12);
+      --accent: #0b7b63;
+      --accent-2: #7e3f2f;
+      --shadow: 0 18px 60px rgba(24, 30, 27, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(11, 123, 99, 0.14), transparent 32%),
+        radial-gradient(circle at right center, rgba(126, 63, 47, 0.12), transparent 28%),
+        linear-gradient(180deg, #fbfaf6 0%, var(--bg) 100%);
+      line-height: 1.5;
+    }
+    .wrap { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    .hero { padding: 72px 0 36px; }
+    .eyebrow { letter-spacing: 0.18em; text-transform: uppercase; font-size: 12px; color: var(--accent); font-weight: 700; }
+    h1, h2, h3 { font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; line-height: 1.02; margin: 0; }
+    h1 { font-size: clamp(44px, 8vw, 82px); max-width: 920px; margin-top: 14px; }
+    .lead { max-width: 760px; margin-top: 20px; font-size: clamp(18px, 2.6vw, 24px); color: var(--muted); }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 28px; }
+    .btn, .ghost { display: inline-block; padding: 14px 18px; border-radius: 999px; text-decoration: none; font-weight: 700; }
+    .btn { background: var(--ink); color: #fff; }
+    .ghost { background: rgba(255,255,255,0.56); color: var(--ink); border: 1px solid var(--line); }
+    .grid { display: grid; grid-template-columns: 1.25fr 0.95fr; gap: 22px; margin-top: 38px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: var(--shadow); backdrop-filter: blur(10px); }
+    .card h3 { font-size: 26px; margin-bottom: 14px; }
+    .stat { padding: 14px 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 132px 1fr; gap: 12px; }
+    .stat:first-of-type { border-top: 0; padding-top: 0; }
+    .stat b { color: var(--accent-2); }
+    .section { padding: 18px 0 54px; }
+    .section h2 { font-size: clamp(30px, 5vw, 52px); margin-bottom: 18px; }
+    .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .bullet { padding: 22px; background: rgba(255,255,255,0.62); border: 1px solid var(--line); border-radius: 22px; }
+    .bullet p { margin: 10px 0 0; color: var(--muted); }
+    ul.clean { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 12px; }
+    ul.clean li { padding: 14px 16px; border-radius: 16px; background: rgba(255,255,255,0.6); border: 1px solid var(--line); }
+    .links { display: grid; gap: 12px; margin-top: 16px; }
+    .links a { color: var(--ink); text-decoration: none; padding: 14px 16px; border-radius: 16px; background: rgba(255,255,255,0.62); border: 1px solid var(--line); display: block; }
+    .footer { padding: 0 0 64px; color: var(--muted); font-size: 14px; }
+    @media (max-width: 860px) { .grid, .three { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">Grant Landing</div>
+      <h1>A replayable memory and evidence layer for adaptive systems.</h1>
+      <p class="lead">
+        LiminalDB is the storage layer of the Liminal Stack: an open database for systems
+        that need memory, replay, auditability, and adaptive behavior in one place.
+      </p>
+      <div class="cta-row">
+        <a class="btn" href="./STACK_DEMO.md">Review stack demo</a>
+        <a class="ghost" href="../grants/README.md">Open grant materials</a>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>Why this layer matters</h3>
+          <div class="stat"><b>Problem</b><span>Traditional storage systems keep records, but often lose the reasoning trail of how an adaptive system changed.</span></div>
+          <div class="stat"><b>Consequence</b><span>Teams rebuild replay, event sourcing, evidence, and protocol access on top of generic stores.</span></div>
+          <div class="stat"><b>Contribution</b><span>LiminalDB gives the stack a memory and evidence primitive built for replay and open access.</span></div>
+        </div>
+        <div class="card">
+          <h3>Reviewer proof points</h3>
+          <div class="links">
+            <a href="./BENCHMARKS.md">Benchmark status and evidence boundaries</a>
+            <a href="./USE_CASE_IOT_MONITORING.md">Use-case writeup with transparent modelling notes</a>
+            <a href="../grants/NLNET_COMMONS_APPLICATION.md">NLnet application draft</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>The grant case</h2>
+      <div class="three">
+        <div class="bullet">
+          <h3>Open access</h3>
+          <p>LiminalDB exposes protocol and SDK surfaces instead of hiding state behind one vendor boundary.</p>
+        </div>
+        <div class="bullet">
+          <h3>Replayable history</h3>
+          <p>Mirror Timeline makes change history persistent and inspectable, which is critical for adaptive systems.</p>
+        </div>
+        <div class="bullet">
+          <h3>Stack fit</h3>
+          <p>It acts as the memory and evidence layer beneath routing and runtime components in the Liminal Stack.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>What reviewers should remember</h2>
+      <ul class="clean">
+        <li>Adaptive systems need more than storage; they need replayable operational memory.</li>
+        <li>Open protocol access matters for digital commons infrastructure.</li>
+        <li>LiminalDB exists to make system change persistent, inspectable, and reusable.</li>
+      </ul>
+    </section>
+
+    <section class="section">
+      <h2>Best next milestone</h2>
+      <p class="lead">
+        The strongest next step is a published live benchmark package with real measurements
+        for latency, throughput, memory, and replay paths.
+      </p>
+    </section>
+
+    <div class="footer">Prepared as grant-oriented landing copy for LiminalDB.</div>
+  </div>
+</body>
+</html>
