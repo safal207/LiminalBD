@@ -116,8 +116,11 @@ Help us meet (or beat) our performance targets:
 
 **How to optimize:**
 ```bash
-# Run benchmarks
-cargo bench --bench cluster_routing
+# Synthetic benchmark harness
+cargo run -p liminaldb-client --example iot-benchmark --release
+
+# Benchmark status and evidence notes
+cat docs/BENCHMARKS.md
 
 # Profile with perf
 cargo flamegraph --bin liminal-cli
@@ -175,9 +178,8 @@ rustc --version
 # Cargo
 cargo --version
 
-# Optional: for benchmarking
+# Optional: for profiling
 cargo install flamegraph
-cargo install criterion
 
 # Optional: for docs generation
 cargo doc --open
