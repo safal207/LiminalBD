@@ -223,7 +223,7 @@ Send sensor data via the **WebSocket interface** (port 8787) or the **CLI**:
 ```
 
 WebSocket clients use the binary/JSON protocol defined in
-[docs/protocol.md](protocol.md). See `sdk/ts/src/client.ts` for a working
+[liminal-db/docs/PROTOCOL.md](../liminal-db/docs/PROTOCOL.md). See `sdk/ts/src/client.ts` for a working
 TypeScript example.
 
 > **Note:** There is no built-in HTTP REST endpoint at this time.
