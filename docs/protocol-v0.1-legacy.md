@@ -1,5 +1,10 @@
 # Протокол взаимодействия v0.1
 
+## Explainability Event Contract
+
+Стабильный конверт explainability-событий и правила совместимости описаны отдельно: `docs/EXPLAINABILITY_EVENT_CONTRACT.md`.
+
+
 ## Impulse
 
 Импульсы — основной способ взаимодействия с тканью.

@@ -1,6 +1,24 @@
 # LiminalDB
 
+LiminalDB is a next-generation database: **reactive, adaptive, and explainable**.
+
+LiminalDB — база данных нового поколения: **реактивная, адаптивная и объяснимая**.
+
 A biologically-inspired, self-adaptive reactive database system written in Rust.
+
+## Why LiminalDB
+
+Most databases focus on storing and retrieving state. LiminalDB keeps this foundation and adds runtime adaptation:
+
+- **Storage**: persist impulses, events, and state snapshots.
+- **Adaptation**: tune behavior under changing signal/load patterns.
+- **Explainability**: expose decisions through metrics, events, and replay.
+
+Большинство БД фокусируются на хранении и чтении состояния. LiminalDB сохраняет эту основу и добавляет адаптацию во время выполнения:
+
+- **Хранение**: фиксация импульсов, событий и снимков состояния.
+- **Адаптация**: подстройка поведения под изменяющиеся сигналы и нагрузку.
+- **Объяснимость**: прозрачность решений через метрики, события и replay.
 
 ## What is LiminalDB?
 
@@ -36,7 +54,7 @@ LiminalDB models data operations as a living ecosystem instead of traditional CR
 **Design principles:** Hexagonal (Ports & Adapters), Event Sourcing, DDD bounded contexts.  
 Core has zero I/O dependencies — adapters can be swapped or tested in isolation.
 
-## Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/safal207/LiminalBD.git
@@ -45,6 +63,28 @@ cd LiminalBD
 cargo build --release -p liminal-cli
 ./target/release/liminal-cli --store ./data --ws-port 8787
 ```
+
+From the repo root you can also run the CLI in debug mode:
+
+```bash
+cargo run -p liminal-cli
+```
+
+Then try a few impulses:
+
+```text
+a cpu/load 0.9
+q color/red 0.7
+w memory/seed 0.5
+```
+
+You should see periodic metrics and hints as the field reacts. A guided walkthrough lives in [`docs/QUICKSTART_5_MIN.md`](docs/QUICKSTART_5_MIN.md).
+
+## Repository map
+
+- `liminal-db/` — core crates, CLI, bridges, storage, docs.
+- `protocol/` — protocol schemas and codegen.
+- `examples/` — integration examples.
 
 ### Interactive session
 
@@ -75,7 +115,7 @@ for event in field.drain_events() {
 ### TypeScript SDK (WebSocket)
 
 > The TypeScript SDK wraps the WebSocket protocol defined in
-> [docs/protocol.md](docs/protocol.md).
+> [liminal-db/docs/PROTOCOL.md](liminal-db/docs/PROTOCOL.md).
 > Source: `sdk/ts/src/client.ts`
 
 ```typescript
@@ -96,7 +136,7 @@ client.send(JSON.stringify({
 }));
 ```
 
-## Project Status
+## Project status
 
 **Version:** 0.5.x (pre-1.0, active development)
 
@@ -114,7 +154,7 @@ client.send(JSON.stringify({
 | Performance benchmarks (real hardware) | 🚧 In progress |
 | Security audit | 🚧 In progress |
 
-## Performance Targets
+## Performance targets
 
 These are **design targets**, not yet validated measurements.
 Benchmarking against a live instance is tracked in
@@ -128,7 +168,7 @@ Benchmarking against a live instance is tracked in
 | Snapshot write (100 MB state) | < 500 ms |
 | Recovery after node failure | < 30 s |
 
-## Use Cases
+## Use cases
 
 - **Adaptive monitoring** — alert thresholds that self-tune to workload
 - **IoT data ingestion** — burst-tolerant pipeline without manual provisioning
@@ -142,8 +182,15 @@ detailed IoT scenario with modelled comparisons vs Redis Streams and Kafka.
 
 | Document | Content |
 |----------|---------|
+| [docs/POSITIONING_V1.md](docs/POSITIONING_V1.md) | Product positioning |
+| [docs/QUICKSTART_5_MIN.md](docs/QUICKSTART_5_MIN.md) | Five-minute walkthrough |
+| [docs/USE_CASE_NORTH_STAR.md](docs/USE_CASE_NORTH_STAR.md) | North-star use case |
+| [docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md](docs/IMPLEMENTATION_BACKLOG_P0_P1_P2.md) | P0/P1/P2 backlog |
+| [docs/EXPLAINABILITY_EVENT_CONTRACT.md](docs/EXPLAINABILITY_EVENT_CONTRACT.md) | Explainability events |
+| [docs/METRICS_GLOSSARY.md](docs/METRICS_GLOSSARY.md) | Metrics glossary |
+| [liminal-db/README.md](liminal-db/README.md) | Workspace crates and build |
+| [liminal-db/docs/PROTOCOL.md](liminal-db/docs/PROTOCOL.md) | Client-server wire format |
 | [docs/ARCHITECTURE_ANALYSIS.md](docs/ARCHITECTURE_ANALYSIS.md) | Design decisions, module breakdown |
-| [docs/protocol.md](docs/protocol.md) | Client-server wire format |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap |
 | [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) | Intellectual and philosophical roots |
 | [docs/adr/](docs/adr/) | Architecture Decision Records |
