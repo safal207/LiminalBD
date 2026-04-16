@@ -15,6 +15,9 @@ target/
 # Log files
 *.log
 
+# Local benchmark runtime artifacts
+benchmark-data/
+
 # OS files
 .DS_Store
 Thumbs.db
