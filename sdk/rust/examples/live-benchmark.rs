@@ -17,7 +17,6 @@
 //!   --query-rounds 25
 //!   --batch-rounds 5
 //!   --batch-size 500
-//!   --timeline-top 20
 
 use std::time::Duration;
 
@@ -38,7 +37,6 @@ struct BenchConfig {
     query_rounds: usize,
     batch_rounds: usize,
     batch_size: usize,
-    timeline_top: usize,
 }
 
 impl Default for BenchConfig {
@@ -49,7 +47,6 @@ impl Default for BenchConfig {
             query_rounds: 25,
             batch_rounds: 5,
             batch_size: 500,
-            timeline_top: 20,
         }
     }
 }
@@ -124,13 +121,6 @@ fn parse_args() -> Result<BenchConfig> {
                     .parse()
                     .context("--batch-size expects an integer")?;
             }
-            "--timeline-top" => {
-                cfg.timeline_top = args
-                    .next()
-                    .context("--timeline-top requires a value")?
-                    .parse()
-                    .context("--timeline-top expects an integer")?;
-            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -149,7 +139,6 @@ fn print_help() {
     println!("  --query-rounds <count>");
     println!("  --batch-rounds <count>");
     println!("  --batch-size <count>");
-    println!("  --timeline-top <count>");
 }
 
 async fn send_json(ws: &mut WsStream, value: JsonValue) -> Result<()> {
@@ -183,6 +172,7 @@ async fn wait_for_event(ws: &mut WsStream, event_name: &str) -> Result<JsonValue
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Frame(_))) => {}
                     Some(Ok(Message::Close(frame))) => {
                         return Err(anyhow!("websocket closed while waiting for {event_name}: {frame:?}"));
                     }
@@ -216,7 +206,6 @@ async fn main() -> Result<()> {
     println!("  query_rounds  : {}", cfg.query_rounds);
     println!("  batch_rounds  : {}", cfg.batch_rounds);
     println!("  batch_size    : {}", cfg.batch_size);
-    println!("  timeline_top  : {}", cfg.timeline_top);
 
     let (mut ws, _) = connect_async(&cfg.url)
         .await
@@ -229,12 +218,12 @@ async fn main() -> Result<()> {
     send_json(
         &mut ws,
         json!({
-            "cmd": "mirror.timeline",
-            "top": cfg.timeline_top,
+            "cmd": "lql",
+            "q": "SELECT bench/live WINDOW 1000",
         }),
     )
     .await?;
-    let _ = wait_for_event(&mut ws, "mirror.timeline").await?;
+    let _ = wait_for_event(&mut ws, "lql").await?;
 
     println!("\nPhase 1: live LQL round-trip");
     let mut query_samples = Vec::with_capacity(cfg.query_rounds);
@@ -258,7 +247,7 @@ async fn main() -> Result<()> {
     println!("  p99           : {:>8.2} ms", query_stats.p99());
     println!("  avg           : {:>8.2} ms", query_stats.avg());
 
-    println!("\nPhase 2: ingest batch + timeline probe");
+    println!("\nPhase 2: ingest batch + LQL drain probe");
     let mut batch_samples = Vec::with_capacity(cfg.batch_rounds);
     let mut total_events = 0usize;
     for round in 0..cfg.batch_rounds {
@@ -273,13 +262,13 @@ async fn main() -> Result<()> {
         send_json(
             &mut ws,
             json!({
-                "cmd": "mirror.timeline",
-                "top": cfg.timeline_top,
+                "cmd": "lql",
+                "q": "SELECT bench/live WINDOW 1000",
                 "round": round,
             }),
         )
         .await?;
-        let _ = wait_for_event(&mut ws, "mirror.timeline").await?;
+        let _ = wait_for_event(&mut ws, "lql").await?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         batch_samples.push(elapsed_ms);
         total_events += cfg.batch_size;
@@ -294,7 +283,7 @@ async fn main() -> Result<()> {
 
     println!("\nNotes:");
     println!("  - LQL numbers are measured live round-trip latency over WebSocket.");
-    println!("  - Batch numbers measure impulse ingest followed by a mirror timeline probe.");
+    println!("  - Batch numbers measure impulse ingest followed by an LQL drain probe.");
     println!("  - For reviewer-grade publishing, record hardware, OS, commit SHA, and exact command lines.");
 
     Ok(())

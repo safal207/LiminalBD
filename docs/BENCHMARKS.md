@@ -5,16 +5,46 @@ still needs to be published for reviewer-grade performance evidence.
 
 ## Current state
 
-LiminalDB does **not** yet publish a full live-hardware benchmark report for
-the main database runtime.
+LiminalDB now has a first live-hardware measurement against `liminal-cli` over
+WebSocket. It is a single-run developer-machine sample, not a reviewer-grade
+benchmark report, and it is documented as such below.
 
-What the repository does already contain:
+What the repository contains today:
 
 - explicit performance targets in `README.md`
 - a synthetic scenario harness in `sdk/rust/examples/iot-benchmark.rs`
 - a live benchmark runner in `sdk/rust/examples/live-benchmark.rs`
+- a first live sample against a local `liminal-cli` instance (see below)
 - a modelled use-case writeup in `docs/USE_CASE_IOT_MONITORING.md`
 - protocol validation through the `conformance` crate
+
+### First live sample
+
+Single-run, single-host developer sample captured from `live-benchmark`
+driving a local `liminal-cli` instance over WebSocket:
+
+| Metric | Value |
+|---|---|
+| Live LQL round-trip p50 | 0.24 ms |
+| Live LQL round-trip p95 | 0.29 ms |
+| Live LQL round-trip p99 | 0.29 ms |
+| Live LQL round-trip avg | 0.24 ms |
+| Ingest batch p50 (500 impulses + LQL drain) | 12.64 ms |
+| Ingest batch p95 | 13.01 ms |
+| Ingest batch p99 | 13.01 ms |
+| Est. ingest throughput | ~38,693 events/sec |
+
+Environment:
+
+- commit: `claude/setup-liminalbd-testing-N2chY` branch
+- rustc: `1.94.1`
+- OS: `Linux x86_64` (container, 16 cores reported)
+- server: `liminal-cli --store /tmp/liminal-bench-data --ws-port 8787`
+- client: `live-benchmark --warmup 50 --query-rounds 25 --batch-rounds 5 --batch-size 500`
+
+This sample should be treated as a sanity-floor only. It is not a replacement
+for a reviewer-grade benchmark package (hardware detail, repeated runs,
+sustained load, memory, snapshot/replay).
 
 ## Evidence categories
 
@@ -25,7 +55,7 @@ What the repository does already contain:
 | Live benchmark runner | Available | `sdk/rust/examples/live-benchmark.rs` |
 | Modelled comparative writeup | Available | `docs/USE_CASE_IOT_MONITORING.md` |
 | Protocol conformance | Available | `conformance/` |
-| Live benchmark report | Not yet published | runner exists; published numbers still pending |
+| Live benchmark report | First sample captured | single-run developer sample above; reviewer-grade report still pending |
 | Continuous performance regression checks | Not yet published | pending |
 
 ## What reviewers can rely on today
@@ -64,14 +94,13 @@ cargo run -p liminaldb-client --example live-benchmark --release -- \
   --warmup 50 \
   --query-rounds 25 \
   --batch-rounds 5 \
-  --batch-size 500 \
-  --timeline-top 20
+  --batch-size 500
 ```
 
 What it measures today:
 
 - live LQL round-trip latency over WebSocket
-- batch ingest followed by a `mirror.timeline` probe
+- batch ingest followed by an LQL drain probe (`SELECT bench/live WINDOW 1000`)
 - estimated ingest throughput for that benchmark shape
 
 What it does **not** yet replace:
