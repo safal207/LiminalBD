@@ -1,18 +1,19 @@
 # LiminalDB Benchmark Status
 
-This document separates what is currently measured, what is modelled, and what
-still needs to be published for reviewer-grade performance evidence.
+This document separates measured data from modelled data and lists what is
+still pending for reviewer-grade benchmarking.
 
 ## Current state
 
-LiminalDB does **not** yet publish a full live-hardware benchmark report for
-the main database runtime.
+LiminalDB now publishes a first live benchmark baseline for the single-node
+WebSocket runtime path.
 
-What the repository does already contain:
+What the repository currently contains:
 
 - explicit performance targets in `README.md`
 - a synthetic scenario harness in `sdk/rust/examples/iot-benchmark.rs`
 - a live benchmark runner in `sdk/rust/examples/live-benchmark.rs`
+- a first measured local baseline (published below)
 - a modelled use-case writeup in `docs/USE_CASE_IOT_MONITORING.md`
 - protocol validation through the `conformance` crate
 
@@ -23,23 +24,70 @@ What the repository does already contain:
 | Design targets | Available | `README.md` |
 | Synthetic scenario harness | Available | `sdk/rust/examples/iot-benchmark.rs` |
 | Live benchmark runner | Available | `sdk/rust/examples/live-benchmark.rs` |
+| First live benchmark baseline | Available | this document (`Measured baseline`) |
 | Modelled comparative writeup | Available | `docs/USE_CASE_IOT_MONITORING.md` |
 | Protocol conformance | Available | `conformance/` |
-| Live benchmark report | Not yet published | runner exists; published numbers still pending |
 | Continuous performance regression checks | Not yet published | pending |
 
-## What reviewers can rely on today
+## Measured baseline (first published sample)
+
+Date: `2026-04-16`  
+Commit: `e71cbac`
+
+Environment:
+
+- OS: Windows 11 (`10.0.26200`)
+- CPU: AMD Ryzen 7 5700U (8 cores / 16 logical)
+- RAM: 16 GB
+- Toolchain used for benchmark binaries: `stable-x86_64-pc-windows-msvc`
+
+Commands:
+
+```bash
+# Server
+target/x86_64-pc-windows-msvc/release/liminal-cli.exe --store ./benchmark-data --ws-port 8787
+
+# Profile A (default)
+target/x86_64-pc-windows-msvc/release/examples/live-benchmark.exe
+
+# Profile B (tuned)
+target/x86_64-pc-windows-msvc/release/examples/live-benchmark.exe --warmup 100 --query-rounds 100 --batch-rounds 10 --batch-size 1000 --timeline-top 50
+```
+
+Results:
+
+### Profile A (default)
+
+- LQL round-trip latency: p50 `0.74 ms`, p95 `0.86 ms`, p99 `0.91 ms`, avg `0.75 ms`
+- Ingest batch + LQL probe: p50 `28.96 ms`, p95 `31.57 ms`, p99 `31.57 ms`, avg `30.23 ms`
+- Estimated ingest throughput: `~16.5K events/sec`
+
+### Profile B (tuned)
+
+- LQL round-trip latency: p50 `1.00 ms`, p95 `1.31 ms`, p99 `1.44 ms`, avg `1.10 ms`
+- Ingest batch + LQL probe: p50 `58.58 ms`, p95 `61.02 ms`, p99 `61.02 ms`, avg `59.00 ms`
+- Estimated ingest throughput: `~16.9K events/sec`
+- Observed process memory during run (`liminal-cli.exe`): `~22 MB RSS` (Windows task manager sample)
+
+Method notes:
+
+- Runner measures live WebSocket `lql` round-trip latency.
+- Batch phase measures impulse ingest followed by a live `lql` probe.
+- This is a developer baseline on one machine, not a long soak or multi-node benchmark.
+
+## What reviewers can rely on now
 
 Reviewers can reasonably rely on the following statements:
 
 - the repository has explicit performance goals
 - the repository includes a synthetic benchmark harness for scenario modelling
 - the repository includes a live benchmark runner for a real WebSocket endpoint
+- the repository now includes a first measured live baseline with reproducible commands
 - the repository is transparent that current IoT comparison numbers are modelled
 - the protocol surface already has a conformance suite
 
-Reviewers should **not** yet treat the current repository as having published
-production-grade benchmark results for live deployments.
+Reviewers should **not** yet treat this as a full production-grade benchmark
+package for live deployments.
 
 ## Run the live benchmark runner
 
@@ -68,10 +116,10 @@ cargo run -p liminaldb-client --example live-benchmark --release -- \
   --timeline-top 20
 ```
 
-What it measures today:
+What it measures:
 
 - live LQL round-trip latency over WebSocket
-- batch ingest followed by a `mirror.timeline` probe
+- batch ingest followed by a live `lql` probe
 - estimated ingest throughput for that benchmark shape
 
 What it does **not** yet replace:
@@ -130,11 +178,9 @@ The next benchmark package should publish, at minimum:
 
 ## Reviewer-facing recommendation
 
-Until live numbers are published, the cleanest positioning is:
+Current safe positioning:
 
 - "performance targets are documented"
 - "synthetic and modelled scenarios are available for transparency"
-- "live benchmarks are the next evidence milestone"
-
-That framing is materially stronger than presenting modelled figures as if they
-were already measured.
+- "a first measured live baseline is published with reproducible commands"
+- "reviewer-grade expansion (soak, replay, multi-node, CI perf gates) is pending"

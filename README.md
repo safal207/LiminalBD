@@ -128,6 +128,10 @@ Benchmarking against a live instance is tracked in
 | Snapshot write (100 MB state) | < 500 ms |
 | Recovery after node failure | < 30 s |
 
+First measured baseline:
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) now includes a published live
+single-node benchmark sample with reproducible commands and explicit caveats.
+
 ## Use Cases
 
 - **Adaptive monitoring** — alert thresholds that self-tune to workload
