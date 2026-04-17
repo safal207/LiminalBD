@@ -15,6 +15,8 @@ the broader Liminal Stack submission to `NGI Zero Commons Fund`.
   text
 - `ADOPTION_PLAN_DONE_REPORT.md` - completion report for the 30/60/90 adoption
   implementation track
+- `REVIEWER_ENTRYPOINT.md` - 5-minute reviewer navigation page linking the
+  most important technical and grant artifacts
 
 ## Current call
 
