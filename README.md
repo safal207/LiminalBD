@@ -1,5 +1,27 @@
 # LiminalDB
 
+![Status](https://img.shields.io/badge/status-active-brightgreen)
+![Core](https://img.shields.io/badge/core-rust-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-orange)
+
+**Project status:** Active core/runtime development with CI coverage and production-focused architecture.
+
+**Quick validation:**
+```bash
+cargo build --release -p liminal-cli
+cargo test --workspace
+```
+
+## Review links
+
+- Architecture: [`docs/`](docs/)
+- Benchmark baseline: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+- Validation: `cargo test --workspace`
+- Security: [`SECURITY.md`](SECURITY.md)
+- Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- Grant materials: [`grants/`](grants/)
+- License: [`LICENSE`](LICENSE)
+
 A biologically-inspired, self-adaptive reactive database system written in Rust.
 
 ## What is LiminalDB?

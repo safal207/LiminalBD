@@ -14,6 +14,12 @@ target/
 
 # Log files
 *.log
+*.tmp
+*.temp
+
+# Cross-language cache/dependency artifacts
+.pytest_cache/
+node_modules/
 
 # Local benchmark runtime artifacts
 benchmark-data/
