@@ -29,51 +29,43 @@ What the repository currently contains:
 | Protocol conformance | Available | `conformance/` |
 | Continuous performance regression checks | Not yet published | pending |
 
-## Measured baseline (first published sample)
+## Measured baseline (latest verified sample)
 
-Date: `2026-04-16`  
-Commit: `e71cbac`
+Date: `2026-04-17`  
+Commit: `97c394093d9cf07088792a0e4f29768d9833cf60`
 
 Environment:
 
-- OS: Windows 11 (`10.0.26200`)
-- CPU: AMD Ryzen 7 5700U (8 cores / 16 logical)
+- OS: Windows 10 Home (`2009`)
+- CPU: AMD Ryzen 7 5700U with Radeon Graphics
 - RAM: 16 GB
+- Rust toolchain: `rustc 1.93.0 (254b59607 2026-01-19)`
 - Toolchain used for benchmark binaries: `stable-x86_64-pc-windows-msvc`
 
 Commands:
 
 ```bash
 # Server
-target/x86_64-pc-windows-msvc/release/liminal-cli.exe --store ./benchmark-data --ws-port 8787
+target/release/liminal-cli.exe --store .\benchmark-data --ws-port 8787
 
-# Profile A (default)
-target/x86_64-pc-windows-msvc/release/examples/live-benchmark.exe
-
-# Profile B (tuned)
-target/x86_64-pc-windows-msvc/release/examples/live-benchmark.exe --warmup 100 --query-rounds 100 --batch-rounds 10 --batch-size 1000 --timeline-top 50
+# Verified profile
+cargo run --release -p liminaldb-client --example live-benchmark -- --url ws://127.0.0.1:8787 --warmup 50 --query-rounds 25 --batch-rounds 5 --batch-size 500 --timeline-top 20
 ```
 
 Results:
 
-### Profile A (default)
+### Verified profile
 
-- LQL round-trip latency: p50 `0.74 ms`, p95 `0.86 ms`, p99 `0.91 ms`, avg `0.75 ms`
-- Ingest batch + LQL probe: p50 `28.96 ms`, p95 `31.57 ms`, p99 `31.57 ms`, avg `30.23 ms`
-- Estimated ingest throughput: `~16.5K events/sec`
-
-### Profile B (tuned)
-
-- LQL round-trip latency: p50 `1.00 ms`, p95 `1.31 ms`, p99 `1.44 ms`, avg `1.10 ms`
-- Ingest batch + LQL probe: p50 `58.58 ms`, p95 `61.02 ms`, p99 `61.02 ms`, avg `59.00 ms`
-- Estimated ingest throughput: `~16.9K events/sec`
-- Observed process memory during run (`liminal-cli.exe`): `~22 MB RSS` (Windows task manager sample)
+- LQL round-trip latency: p50 `18.15 ms`, p95 `46.47 ms`, p99 `56.53 ms`, avg `23.13 ms`
+- Ingest batch + LQL probe: p50 `72.81 ms`, p95 `97.66 ms`, p99 `97.66 ms`, avg `97.63 ms`
+- Estimated ingest throughput: `~5.1K events/sec`
 
 Method notes:
 
 - Runner measures live WebSocket `lql` round-trip latency.
 - Batch phase measures impulse ingest followed by a live `lql` probe.
 - This is a developer baseline on one machine, not a long soak or multi-node benchmark.
+- The current live runner was verified against the server's actual `cmd`/`ev` WebSocket protocol path.
 
 ## What reviewers can rely on now
 
@@ -124,7 +116,7 @@ What it measures:
 
 What it does **not** yet replace:
 
-- a published benchmark report with hardware and OS metadata
+- a broader benchmark package with soak, replay, and multi-node evidence
 - long-duration soak measurements
 - multi-node or Raft/distribution measurements
 
