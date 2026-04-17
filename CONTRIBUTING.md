@@ -28,6 +28,15 @@ Found a bug or have a feature request? Open an issue:
 # - Environment (OS, Rust version)
 ```
 
+### First-contributor lane
+
+If you are new to the repository, start with:
+
+- [`docs/FIRST_CONTRIBUTOR_ISSUES.md`](docs/FIRST_CONTRIBUTOR_ISSUES.md)
+
+Each issue includes scope limits, direct context links, and acceptance
+criteria so first PRs stay reviewable.
+
 ### 2. **Improve Documentation**
 
 Documentation is crucial and often needs help:

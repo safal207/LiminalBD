@@ -12,10 +12,16 @@ cargo build --release -p liminal-cli
 cargo test --workspace
 ```
 
+**Single-command demo entrypoint (Windows):**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo-stack.ps1
+```
+
 ## Review links
 
 - Architecture: [`docs/`](docs/)
 - Benchmark baseline: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
+- Release + compatibility: [`docs/RELEASE_COMPATIBILITY.md`](docs/RELEASE_COMPATIBILITY.md)
 - Validation: `cargo test --workspace`
 - Security: [`SECURITY.md`](SECURITY.md)
 - Roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
@@ -67,6 +73,17 @@ cd LiminalBD
 cargo build --release -p liminal-cli
 ./target/release/liminal-cli --store ./data --ws-port 8787
 ```
+
+Expected output:
+
+- `ws.local_listening` in CLI logs
+- `ws_server.listening addr=127.0.0.1:8787` in bridge logs
+- CLI accepts commands like `:status` and `:mirror top 10`
+
+If `liminal-cli` exits immediately on Windows, keep stdin open (for example
+with `cmd /c "ping -t 127.0.0.1 | ..."`). See
+[`docs/STACK_DEMO.md`](docs/STACK_DEMO.md) for a reproducible stack flow and
+troubleshooting hints.
 
 ### Interactive session
 

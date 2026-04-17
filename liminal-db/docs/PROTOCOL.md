@@ -1,5 +1,12 @@
 # Протокол взаимодействия LiminalDB v0.2
 
+## Release compatibility policy
+
+Protocol and SDK compatibility rules and release-note requirements are tracked
+in [`../../docs/RELEASE_COMPATIBILITY.md`](../../docs/RELEASE_COMPATIBILITY.md).
+When protocol fields/events/commands change, include compatibility level and
+migration note in the corresponding PR and release notes.
+
 ## Auth & Namespaces
 
 LiminalDB v0.9 вводит обязательную аутентификацию ключами и пространство имён (namespace) как единицу изоляции данных. Каждый API-ключ связан с ролью (`admin`, `writer`, `reader`) и пространством, в котором он действует. Подключение по WebSocket начинается с рукопожатия:

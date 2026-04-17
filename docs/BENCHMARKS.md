@@ -32,7 +32,7 @@ What the repository currently contains:
 ## Measured baseline (latest verified sample)
 
 Date: `2026-04-17`  
-Commit: `97c394093d9cf07088792a0e4f29768d9833cf60`
+Commit: `ad7dd5cfe91b389f9900e454972631621fc1a7be`
 
 Environment:
 
@@ -52,13 +52,32 @@ target/release/liminal-cli.exe --store .\benchmark-data --ws-port 8787
 cargo run --release -p liminaldb-client --example live-benchmark -- --url ws://127.0.0.1:8787 --warmup 50 --query-rounds 25 --batch-rounds 5 --batch-size 500 --timeline-top 20
 ```
 
+## Reproduce in 3 commands
+
+```bash
+# 1) Build benchmark binaries
+cargo +stable-x86_64-pc-windows-msvc build --release -p liminal-cli -p liminaldb-client --example live-benchmark --target x86_64-pc-windows-msvc
+
+# 2) Start server (keep this terminal open)
+target/x86_64-pc-windows-msvc/release/liminal-cli.exe --store .\benchmark-data --ws-port 8787
+
+# 3) Run measured profile
+target/x86_64-pc-windows-msvc/release/examples/live-benchmark.exe --url ws://127.0.0.1:8787 --warmup 50 --query-rounds 25 --batch-rounds 5 --batch-size 500 --timeline-top 20
+```
+
+Expected output markers from step 3:
+
+- `Phase 1: live LQL round-trip`
+- `Phase 2: ingest batch + LQL probe`
+- `est ingest ... events/sec`
+
 Results:
 
 ### Verified profile
 
-- LQL round-trip latency: p50 `18.15 ms`, p95 `46.47 ms`, p99 `56.53 ms`, avg `23.13 ms`
-- Ingest batch + LQL probe: p50 `72.81 ms`, p95 `97.66 ms`, p99 `97.66 ms`, avg `97.63 ms`
-- Estimated ingest throughput: `~5.1K events/sec`
+- LQL round-trip latency: p50 `0.87 ms`, p95 `1.00 ms`, p99 `1.60 ms`, avg `0.95 ms`
+- Ingest batch + LQL probe: p50 `30.88 ms`, p95 `32.68 ms`, p99 `32.68 ms`, avg `32.59 ms`
+- Estimated ingest throughput: `~15.3K events/sec`
 
 Method notes:
 
@@ -66,6 +85,24 @@ Method notes:
 - Batch phase measures impulse ingest followed by a live `lql` probe.
 - This is a developer baseline on one machine, not a long soak or multi-node benchmark.
 - The current live runner was verified against the server's actual `cmd`/`ev` WebSocket protocol path.
+
+## Public validation refresh (2026-04-17)
+
+Profile rerun:
+
+- `--warmup 50 --query-rounds 25 --batch-rounds 5 --batch-size 500 --timeline-top 20`
+
+Delta vs previous published sample in this repo:
+
+- LQL p50: `18.15 ms` -> `0.87 ms` (improved by ~`95.2%`)
+- Batch avg: `97.63 ms` -> `32.59 ms` (improved by ~`66.6%`)
+- Estimated ingest throughput: `~5.1K/sec` -> `~15.3K/sec` (~`3.0x`)
+
+Caveats:
+
+- These numbers are from a single local machine and are sensitive to local load.
+- Refresh runs are useful for trend checking, not for broad hardware claims.
+- Production-grade evidence still requires soak, replay, and multi-node packs.
 
 ## What reviewers can rely on now
 
@@ -80,6 +117,17 @@ Reviewers can reasonably rely on the following statements:
 
 Reviewers should **not** yet treat this as a full production-grade benchmark
 package for live deployments.
+
+## Measured vs pending evidence
+
+| Item | Status | Notes |
+|---|---|---|
+| Single-node live LQL latency | Measured | Published in this file |
+| Single-node ingest + LQL probe throughput | Measured | Published in this file |
+| Soak / long-duration stability | Pending | Not yet published |
+| Snapshot + replay timing package | Pending | Planned expansion |
+| Multi-node/consensus performance | Pending | Planned expansion |
+| CI performance regression gate | Pending | Nightly smoke planned |
 
 ## Run the live benchmark runner
 

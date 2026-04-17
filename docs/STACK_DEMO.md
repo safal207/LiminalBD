@@ -10,6 +10,17 @@ DAO_lim -> GardenLiminal -> LiminalDB
 The goal is to give reviewers one short, reproducible scenario showing how the
 three repositories fit together today.
 
+## Canonical entrypoint (Windows)
+
+From `LiminalBD` root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo-stack.ps1
+```
+
+This script prints the exact server and benchmark commands used by the current
+baseline and expected output markers.
+
 ## Repositories
 
 - DAO_lim: https://github.com/safal207/DAO_lim
@@ -37,6 +48,13 @@ Expected outcome:
 - WebSocket endpoint available on `ws://127.0.0.1:8787`
 - live state visible in the CLI
 - recent events visible through Mirror Timeline
+
+Troubleshooting:
+
+- If the process exits immediately on Windows, run with stdin keepalive:
+  `cmd /c "ping -t 127.0.0.1 | .\target\x86_64-pc-windows-msvc\release\liminal-cli.exe --store .\benchmark-data --ws-port 8787"`.
+- If benchmark cannot connect (`os error 10061`), verify `ws_server.listening`
+  appears in server logs before starting the client.
 
 ## 2. Run GardenLiminal against the LiminalDB endpoint
 
