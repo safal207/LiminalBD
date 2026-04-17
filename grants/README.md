@@ -13,6 +13,8 @@ the broader Liminal Stack submission to `NGI Zero Commons Fund`.
   for reviewers or cover notes
 - `STACK_EVIDENCE_SNAPSHOT_RU.md` - same blurb in Russian for local submission
   text
+- `ADOPTION_PLAN_DONE_REPORT.md` - completion report for the 30/60/90 adoption
+  implementation track
 
 ## Current call
 
