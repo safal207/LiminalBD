@@ -40,6 +40,23 @@ and GardenLiminal (secure container runtime). Together they form a
 full-stack building block for deploying autonomous AI agents with
 transparency, auditability, and data sovereignty.
 
+## Measured evidence snapshot
+
+The stack now includes a first cross-repo evidence layer suitable for grant
+reviewers:
+
+- **DAO_lim**: https://github.com/safal207/DAO_lim — end-to-end benchmark
+  report (steady-state and failover) with explainable routing and circuit
+  behaviour on unhealthy backends.
+- **GardenLiminal**: https://github.com/safal207/GardenLiminal — Linux
+  microbenchmarks for manifest parsing and lifecycle event serialization.
+- **LiminalDB** (this repository): first published live WebSocket baseline in
+  [`docs/BENCHMARKS.md`](../docs/BENCHMARKS.md).
+
+Longer language-specific blurbs for cover notes live in
+[`STACK_EVIDENCE_SNAPSHOT_EN.md`](STACK_EVIDENCE_SNAPSHOT_EN.md) and
+[`STACK_EVIDENCE_SNAPSHOT_RU.md`](STACK_EVIDENCE_SNAPSHOT_RU.md).
+
 ## Problem
 
 Modern AI infrastructure lacks trustworthy, open building blocks at every

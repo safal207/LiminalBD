@@ -38,5 +38,9 @@ Within the shared stack application, LiminalBD is the work package for:
 ## Submission notes
 
 - Use `LiminalDB` as the project name and `LiminalBD` as the repository slug.
-- Keep performance numbers framed as targets unless benchmarked and published.
+- Published live baseline numbers live in `docs/BENCHMARKS.md`; keep README
+  targets clearly labelled as design targets where they are not yet validated
+  at scale.
 - Use this brief together with `NLNET_COMMONS_APPLICATION.md` for submission.
+- For a paste-ready stack-wide narrative, see `STACK_EVIDENCE_SNAPSHOT_EN.md`
+  and `STACK_EVIDENCE_SNAPSHOT_RU.md` in this directory.

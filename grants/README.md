@@ -9,6 +9,10 @@ the broader Liminal Stack submission to `NGI Zero Commons Fund`.
   `DAO_lim`, `LiminalBD`, and `GardenLiminal`
 - `NLNET_COMMONS_REPO_BRIEF.md` - LiminalBD-specific positioning, scope, and
   submission notes
+- `STACK_EVIDENCE_SNAPSHOT_EN.md` - short stack-wide evidence blurb (English)
+  for reviewers or cover notes
+- `STACK_EVIDENCE_SNAPSHOT_RU.md` - same blurb in Russian for local submission
+  text
 
 ## Current call
 
